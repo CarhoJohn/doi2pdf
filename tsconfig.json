@@ -1,0 +1,5 @@
+{
+  "extends": "zotero-types/entries/mainWindow/",
+  "include": ["src", "typings"],
+  "exclude": ["build", "addon"]
+}
