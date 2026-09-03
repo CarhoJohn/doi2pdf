@@ -1,6 +1,38 @@
 import { getString, initLocale } from "./utils/locale";
 import { createZToolkit } from "./utils/ztoolkit";
 
+let preferencePaneID: string | undefined;
+
+/**
+ * Register the plugin's settings pane with Zotero's preferences window.
+ *
+ * The pane is loaded from the packaged XHTML fragment and is automatically
+ * removed by Zotero when the plugin shuts down.
+ */
+async function registerPreferencePane(): Promise<void> {
+  preferencePaneID = await Zotero.PreferencePanes.register({
+    pluginID: addon.data.config.addonID,
+    src: `${rootURI}content/preferences.xhtml`,
+    label: addon.data.config.addonName,
+  });
+}
+
+/**
+ * Handle preference pane lifecycle events emitted by the XHTML fragment.
+ *
+ * @param event Preference pane event name.
+ * @param data Event payload containing the pane window.
+ */
+function onPrefsEvent(event: string, data: { window?: Window }): void {
+  if (event !== "load" || !data.window) return;
+
+  addon.data.prefs = {
+    window: data.window,
+    columns: [],
+    rows: [],
+  };
+}
+
 async function onStartup() {
   await Promise.all([
     Zotero.initializationPromise,
@@ -9,6 +41,7 @@ async function onStartup() {
   ]);
 
   initLocale();
+  await registerPreferencePane();
 
   addon.registerEndpoints();
 
@@ -61,6 +94,10 @@ async function onMainWindowUnload(win: Window): Promise<void> {
 }
 
 function onShutdown(): void {
+  if (preferencePaneID) {
+    Zotero.PreferencePanes.unregister(preferencePaneID);
+    preferencePaneID = undefined;
+  }
   addon.unregisterEndpoints();
   ztoolkit.unregisterAll();
   addon.data.dialog?.window?.close();
@@ -69,6 +106,8 @@ function onShutdown(): void {
   // @ts-expect-error - Plugin instance is not typed
   delete Zotero[addon.data.config.addonInstance];
 }
+
+export { onPrefsEvent };
 
 // Add your hooks here. For element click, etc.
 // Keep in mind hooks only do dispatch. Don't add code that does real jobs in hooks.
@@ -79,4 +118,5 @@ export default {
   onShutdown,
   onMainWindowLoad,
   onMainWindowUnload,
+  onPrefsEvent,
 };

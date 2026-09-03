@@ -3,8 +3,6 @@
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![License: AGPL-3.0-or-later](https://img.shields.io/github/license/GOKORURI007/zotero-api-plus)](https://github.com/GOKORURI007/zotero-api-plus/blob/main/LICENSE)
 
-[English](../README.md) | [简体中文](./README-zhCN.md)
-
 一个为 Zotero 本地 API 扩展额外功能的插件。
 
 ## 版本与来源
@@ -13,14 +11,11 @@
 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
 的 `v0.2.1` 版本继续开发。
 
-`package.json` 中的 `repository`、`bugs` 和 `homepage` 暂时保留上游仓库地址。
-这些字段用于记录代码来源，也供构建工具生成更新地址；本地开发并不表示已经向
-GitHub 发布了本项目。
-
 ## 功能特性
 
 - 为 Zotero 本地 API 扩展自定义端点
 - 通过 API 使用标识符（DOI、ISBN、PMID 等）向 Zotero 添加项目
+- 在 Zotero 设置中配置 DOI 项目的目标 Collection；不存在时首次使用会自动创建
 - 健康检查端点，用于验证插件状态
 - 易于与其他工具和脚本集成
 
@@ -91,7 +86,7 @@ GET /api/plus/selected-collection
 No Collection selected.
 ```
 
-### 添加 DOI 并查找全文
+### 添加 DOI 并查找全文 (新增功能)
 
 ```
 POST /api/plus/add-doi
@@ -111,6 +106,9 @@ Content-Type: application/json
 ```
 
 `doi` 必填；`collectionKey` 和 `findFullText` 可选，默认会尝试查找全文。
+未传入 collectionKey 时，项目会保存到插件设置中的目标 Collection；如果该
+Collection 不存在，插件会在首次添加时自动创建。设置值支持使用
+父级/子级表示嵌套 Collection。
 
 #### 响应
 
@@ -130,7 +128,7 @@ Content-Type: application/json
 
 全文不可用时，`fullText.status` 为 `not_found`，元数据条目仍会保留。
 
-### 为已有条目查找全文
+### 为已有条目查找全文 (新增功能)
 
 ```
 POST /api/plus/find-fulltext
@@ -159,7 +157,8 @@ Content-Type: application/json
 ## 使用
 
 1. 确保 Zotero 的本地 API 已启用（转到 `编辑 > 首选项 > 高级 > 文件和文件夹 > 显示数据目录`，然后编辑 `prefs.js` 并添加 `user_pref("extensions.zotero.httpServer.enabled", true);`）。
-2. 按照上述描述使用 API 端点。
+2. 在 Zotero 设置中的 doi2pdf 页面设置目标 Collection，默认值为 doi2pdf。
+3. 按照上述描述使用 API 端点。请求中显式提供 collectionKey 时，会覆盖插件设置。
 
 ## 开发
 

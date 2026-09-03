@@ -7,6 +7,7 @@ import hooks from "./hooks";
 import { createZToolkit } from "./utils/ztoolkit";
 import { AddDOIEndpoint } from "./endpoints/addDOI";
 import { FindFullTextEndpoint } from "./endpoints/findFullText";
+import { resolveDestinationCollection } from "./services/identifier";
 
 // 定义 AddItemEndpoint 类
 
@@ -49,20 +50,9 @@ Zotero.Server.LocalAPI.AddItemEndpoint = class extends (
         return [400, "text/plain", "Error: Could not parse identifier"];
       }
 
-      // 获取用户的库 ID 和目标收藏夹
+      // 获取用户的库 ID 和目标收藏夹；未指定 key 时使用插件设置。
       const libraryID = Zotero.Libraries.userLibraryID;
-      let collections: number[] | false = false;
-
-      // 如果指定了收藏夹 key，查询对应的收藏夹
-      if (collectionKey) {
-        const col = Zotero.Collections.getByLibraryAndKey(
-          libraryID,
-          collectionKey,
-        );
-        if (col) {
-          collections = [col.id];
-        }
-      }
+      const collections = await resolveDestinationCollection(collectionKey);
 
       // 遍历每个标识符并添加对应的项目
       const newItems: Zotero.Item[] = [];

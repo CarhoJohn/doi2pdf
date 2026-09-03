@@ -4,7 +4,7 @@ import {
   findItemByDOI,
   IdentifierError,
   normalizeDOI,
-  resolveCollection,
+  resolveDestinationCollection,
   summarizeItem,
 } from "../services/identifier";
 import { findFullText } from "../services/fullText";
@@ -32,7 +32,7 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
       const doi = normalizeDOI(req.data?.doi);
       if (!doi) throw new IdentifierError("INVALID_DOI", "Could not parse DOI");
       const collectionKey = req.data?.collectionKey;
-      const collections = resolveCollection(collectionKey);
+      const collections = await resolveDestinationCollection(collectionKey);
       const shouldFindFullText = req.data?.findFullText !== false;
       if (
         req.data?.findFullText !== undefined &&

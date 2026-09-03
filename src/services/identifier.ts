@@ -1,4 +1,7 @@
-/** Utilities for resolving identifiers and creating Zotero items. */
+import { getPref } from "../utils/prefs";
+
+/** Default collection path used when the API request does not specify a key. */
+export const DEFAULT_COLLECTION_NAME = "doi2pdf";
 
 export class IdentifierError extends Error {
   /** Stable error code returned by the local API. */
@@ -89,6 +92,71 @@ export function resolveCollection(collectionKey?: unknown): number[] | false {
 }
 
 /**
+ * Read and normalize the configured destination collection path.
+ *
+ * A slash separates nested collections. Empty or whitespace-only values use
+ * the default collection so a malformed preference cannot disable routing.
+ *
+ * @returns Collection names from the top level to the destination.
+ */
+export function getConfiguredCollectionPath(): string[] {
+  const configuredName = getPref("collectionName");
+  const path = typeof configuredName === "string" ? configuredName.trim() : "";
+  const collectionPath = (path || DEFAULT_COLLECTION_NAME)
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return collectionPath.length ? collectionPath : [DEFAULT_COLLECTION_NAME];
+}
+
+/**
+ * Find or create the configured destination collection path.
+ *
+ * @returns Collection IDs suitable for Zotero's translator, or false when no
+ * collection path can be resolved.
+ */
+export async function resolveConfiguredCollection(): Promise<number[] | false> {
+  const libraryID = Zotero.Libraries.userLibraryID;
+  let parentID: number | undefined;
+
+  // Resolve each path segment so users can configure nested collections.
+  for (const name of getConfiguredCollectionPath()) {
+    const candidates =
+      parentID === undefined
+        ? Zotero.Collections.getByLibrary(libraryID)
+        : Zotero.Collections.getByParent(parentID);
+    let collection = candidates.find((candidate) => candidate.name === name);
+
+    if (!collection) {
+      collection = new Zotero.Collection({
+        name,
+        libraryID,
+        ...(parentID === undefined ? {} : { parentID }),
+      });
+      await collection.saveTx();
+    }
+    parentID = collection.id;
+  }
+
+  return parentID === undefined ? false : [parentID];
+}
+
+/**
+ * Resolve an explicit collection key or fall back to the configured path.
+ *
+ * @param collectionKey Optional collection key supplied by the API caller.
+ * @returns Collection IDs suitable for Zotero's translator, or false.
+ */
+export async function resolveDestinationCollection(
+  collectionKey?: unknown,
+): Promise<number[] | false> {
+  if (collectionKey === undefined) {
+    return resolveConfiguredCollection();
+  }
+  return resolveCollection(collectionKey);
+}
+
+/**
  * Add a single identifier through Zotero's built-in translator.
  *
  * @param identifier DOI, ISBN, PMID, or another Zotero-supported identifier.
@@ -97,7 +165,7 @@ export function resolveCollection(collectionKey?: unknown): number[] | false {
  */
 export async function addByIdentifier(
   identifier: string,
-  collectionKey?: string,
+  collectionKey?: unknown,
 ): Promise<Zotero.Item> {
   const identifiers = Zotero.Utilities.extractIdentifiers(identifier);
   if (!identifiers.length) {
@@ -107,7 +175,7 @@ export async function addByIdentifier(
     );
   }
 
-  const collections = resolveCollection(collectionKey);
+  const collections = await resolveDestinationCollection(collectionKey);
   const translate = new Zotero.Translate.Search();
   translate.setIdentifier(identifiers[0]);
   const translators = await translate.getTranslators();
