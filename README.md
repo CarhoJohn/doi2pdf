@@ -1,6 +1,6 @@
 # doi2pdf
 
-[![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![zotero target version](https://img.shields.io/badge/Zotero-9%20%7C%2010.0.1-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![License: AGPL-3.0-or-later](https://img.shields.io/github/license/GOKORURI007/zotero-api-plus)](https://github.com/GOKORURI007/zotero-api-plus/blob/main/LICENSE)
 
 一个为 Zotero 本地 API 扩展额外功能的插件。
@@ -10,6 +10,8 @@
 当前本地开发版本为 `0.1.0`。本项目基于
 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
 的 `v0.2.1` 版本继续开发。
+
+插件清单兼容 Zotero 9 及 Zotero 10.0.x（包括 10.0.1）。
 
 ## 功能特性
 
