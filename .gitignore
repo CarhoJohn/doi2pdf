@@ -15,7 +15,8 @@ tsconfig.tsbuildinfo
 build
 logs
 
-.github
 .vscode
 __pycache__
 node_modules/
+
+.playwright*/
