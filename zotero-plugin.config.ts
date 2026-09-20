@@ -7,7 +7,8 @@ export default defineConfig({
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
-  xpiName: pkg.config.addonRef,
+  // Include the package version so builds remain identifiable in this directory.
+  xpiName: `${pkg.config.addonRef}-v${pkg.version}`,
   updateURL: `https://github.com/{{owner}}/{{repo}}/releases/download/release/${
     pkg.version.includes("-") ? "update-beta.json" : "update.json"
   }`,

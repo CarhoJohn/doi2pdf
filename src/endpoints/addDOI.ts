@@ -26,6 +26,7 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
       collectionKey?: unknown;
       findFullText?: unknown;
       methods?: unknown;
+      shortTitle?: unknown;
     };
   }) {
     try {
@@ -64,6 +65,13 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
         item = await addByIdentifier(doi, collectionKey as string | undefined);
       } else if (collections !== false) {
         item.addToCollection(collections[0]);
+        await item.saveTx();
+      }
+
+      const shortTitle = req.data?.shortTitle;
+      // Preserve translator or existing values unless a usable override is sent.
+      if (typeof shortTitle === "string" && shortTitle.trim()) {
+        item.setField("shortTitle", shortTitle.trim());
         await item.saveTx();
       }
 

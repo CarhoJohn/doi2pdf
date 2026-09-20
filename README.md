@@ -7,7 +7,7 @@
 
 ## 版本与来源
 
-当前本地开发版本为 `0.1.0`。本项目基于
+当前本地开发版本为 `0.1.2`。本项目基于
 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
 的 `v0.2.1` 版本继续开发。
 
@@ -103,11 +103,14 @@ Content-Type: application/json
 {
   "doi": "10.1038/s41562-026-02563-9",
   "collectionKey": "ABC123",
-  "findFullText": true
+  "findFullText": true,
+  "shortTitle": "Custom short title"
 }
 ```
 
-`doi` 必填；`collectionKey` 和 `findFullText` 可选，默认会尝试查找全文。
+`doi` 必填；`collectionKey`、`findFullText` 和 `shortTitle` 可选，默认会尝试查找全文。
+仅当 `shortTitle` 显式传入且为非空字符串时，插件才会将其写入并覆盖条目的
+Short Title；未传入或传入空字符串时不会改动该字段。
 未传入 collectionKey 时，项目会保存到插件设置中的目标 Collection；如果该
 Collection 不存在，插件会在首次添加时自动创建。设置值支持使用
 父级/子级表示嵌套 Collection。
@@ -149,8 +152,8 @@ Content-Type: application/json
 ## 安装
 
 1. 本地开发时，使用 `npm run build` 生成的
-   `.scaffold/build/doi2pdf.xpi`；上游发布包可从
-   [GitHub Releases](https://github.com/GOKORURI007/zotero-api-plus/releases) 下载。
+   `.scaffold/build/doi2pdf-v<version>.xpi`；发布包可从
+   [GitHub Releases](https://github.com/CarhoJohn/doi2pdf/releases) 下载。
 2. 在 Zotero 中，转到 `工具 > 插件`。
 3. 点击齿轮图标，选择 `从文件安装插件...`。
 4. 选择下载的 `.xpi` 文件。
@@ -184,18 +187,21 @@ npm run start
 npm run build
 ```
 
-构建成功后，标准 XPI 文件位于：
+构建成功后，版本化的 XPI 文件位于：
 
 ```text
-.scaffold/build/doi2pdf.xpi
+.scaffold/build/doi2pdf-v<version>.xpi
 ```
+
+例如，当前版本的文件名为 `doi2pdf-v0.1.2.xpi`。文件名即为构建版本；也可以
+读取 `.scaffold/build/addon/manifest.json` 的 `version` 字段确认。
 
 这是可以交给 Zotero 安装的发布包，不要直接把源码目录或
 `.scaffold/build/addon` 目录作为插件安装。可以用以下命令确认包内包含
 插件入口脚本：
 
 ```powershell
-tar -tf .scaffold/build/doi2pdf.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
+tar -tf .scaffold/build/doi2pdf-v0.1.2.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
 ```
 
 手动安装本地构建包：
@@ -203,7 +209,7 @@ tar -tf .scaffold/build/doi2pdf.xpi | Select-String '^(bootstrap.js|manifest.jso
 1. 关闭正在运行的 Zotero 开发实例或旧的 doi2pdf 开发安装。
 2. 启动 Zotero，转到 `工具 > 插件`。
 3. 点击齿轮图标，选择 `从文件安装插件...`。
-4. 选择 `.scaffold/build/doi2pdf.xpi`。
+4. 选择 `.scaffold/build/doi2pdf-v<version>.xpi`。
 5. 按提示重启 Zotero，并在插件列表中确认 `doi2pdf` 已出现。
 
 如果使用 `npm run start` 做热重载，建议在单独的 Zotero profile 中运行；开发
