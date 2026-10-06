@@ -1,5 +1,32 @@
 import { IdentifierError, normalizeDOI } from "./identifier";
 
+export interface PDFCandidate {
+  path: string;
+  source: "native" | "nature" | "pnas";
+  url?: string;
+  timings?: { articleMs: number; pdfMs: number; totalMs: number };
+  cleanup: () => void;
+}
+
+/**
+ * Resolve plugin-owned runtime data under Zotero's configured data directory.
+ *
+ * Args:
+ *   child: Optional plugin subdirectory, never an arbitrary path.
+ * Returns:
+ *   A writable native directory; existing Zotero storage is not modified.
+ */
+export function getPluginDataDirectory(child?: "chrome_profile" | "downloads") {
+  const directory = Zotero.File.pathToFile(Zotero.DataDirectory.dir).clone();
+  directory.append("doi2pdf");
+  if (!directory.exists()) directory.create(1, 0o700);
+  if (child) {
+    directory.append(child);
+    if (!directory.exists()) directory.create(1, 0o700);
+  }
+  return directory;
+}
+
 /** Serialize attachment writes for each parent across all plugin endpoints. */
 const imports = new Map<string, Promise<Zotero.Item>>();
 
@@ -117,7 +144,7 @@ export async function importPDF(
 }
 
 /**
- * Create an isolated download directory in the system temporary directory.
+ * Create an isolated task directory inside the plugin's runtime data.
  *
  * Args:
  *   source: Name of the download route, for local diagnostics.
@@ -125,7 +152,7 @@ export async function importPDF(
  *   The private directory, PDF path, and an idempotent cleanup callback.
  */
 export function createPDFTemp(source: string) {
-  const directory = Zotero.getTempDirectory().clone();
+  const directory = getPluginDataDirectory("downloads");
   directory.append(`doi2pdf-${source}-${Zotero.Utilities.randomString(12)}`);
   directory.create(1, 0o700);
   const file = directory.clone();

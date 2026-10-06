@@ -5,6 +5,7 @@ import {
   downloadNaturePDF,
   PDFCandidate,
 } from "./naturePDF";
+import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
 
 export const NATIVE_WAIT_MS = 15_000;
 export type FullTextStatus = "found" | "not_found" | "failed";
@@ -12,19 +13,22 @@ export interface FullTextResult {
   status: FullTextStatus;
   attachmentID?: number;
   attachmentKey?: string;
-  source?: "existing" | "native" | "nature";
+  source?: "existing" | "native" | "nature" | "pnas";
+  code?: string;
   timings?: PDFCandidate["timings"];
   message?: string;
   attempts?: {
-    source: "native" | "nature";
+    source: "native" | "nature" | "pnas";
     status: string;
     message?: string;
+    code?: string;
   }[];
 }
 
 interface DownloadOutcome {
   candidate?: PDFCandidate;
   message?: string;
+  code?: string;
 }
 
 /** The native methods exist in Zotero 9/10 but bundled typings lag behind. */
@@ -109,6 +113,11 @@ async function resolveFullText(
   const win = Zotero.getMainWindow();
   const attempts: NonNullable<FullTextResult["attempts"]> = [];
   const expectedDOI = normalizeDOI(item.getField("DOI")) ?? undefined;
+  const fallbackSource = canFetchPNASPDF(item)
+    ? "pnas"
+    : canFetchNaturePDF(item)
+      ? "nature"
+      : undefined;
   try {
     const existing = await getPDFAttachment(item);
     if (existing)
@@ -123,7 +132,7 @@ async function resolveFullText(
       (error) => ({ message: error?.message || String(error) }),
     );
     let outcome: DownloadOutcome;
-    if (canFetchNaturePDF(item)) {
+    if (fallbackSource) {
       // A timer observes the task; it does not cancel or detach the parent item.
       const threshold = new Promise<undefined>((resolve) => {
         timer = win.setTimeout(() => resolve(undefined), NATIVE_WAIT_MS);
@@ -142,9 +151,16 @@ async function resolveFullText(
             : "timeout",
           message: initial?.message,
         });
-        fallback = downloadNaturePDF(item).then(
+        fallback = (
+          fallbackSource === "pnas"
+            ? downloadPNASPDF(item)
+            : downloadNaturePDF(item)
+        ).then(
           (candidate) => ({ candidate }),
-          (error) => ({ message: error?.message || String(error) }),
+          (error) => ({
+            message: error?.message || String(error),
+            code: error?.code,
+          }),
         );
         // A late native success may still win during the 20-second fallback budget.
         // Native failures never suppress a running publisher attempt.
@@ -159,14 +175,16 @@ async function resolveFullText(
     const candidate = outcome.candidate;
     if (!candidate) {
       attempts.push({
-        source: fallback ? "nature" : "native",
+        source: fallback ? fallbackSource! : "native",
         status: outcome.message ? "failed" : "not_found",
         message: outcome.message,
+        code: outcome.code,
       });
       return {
         status: outcome.message ? "failed" : "not_found",
         message: outcome.message,
         attempts,
+        code: outcome.code,
       };
     }
     // Both routes and manual PDF imports use the same per-item write lock.
@@ -209,7 +227,7 @@ async function resolveFullText(
  *   item: Existing regular item.
  *   methods: Optional resolver order; the first concurrent caller chooses it.
  * Returns:
- *   Structured full-text result after native retrieval or Nature fallback.
+ *   Structured result after native retrieval or a publisher fallback.
  */
 export async function findFullText(
   item: Zotero.Item,

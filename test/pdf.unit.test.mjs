@@ -10,6 +10,7 @@ const bundle = buildSync({
   stdin: {
     contents: `export * from './src/services/fullText';
       export * from './src/services/pdf';
+      export * from './src/services/pnasPDF';
       export * from './src/endpoints/importPDF';
       export * from './src/endpoints/addDOI';`,
     resolveDir: process.cwd(),
@@ -21,6 +22,7 @@ const bundle = buildSync({
 }).outputFiles[0].text;
 const DOI = "10.1038/s42256-026-01281-1";
 const PDF = "%PDF-1.4\nfixture";
+const PNAS_DOI = "10.1073/pnas.2515233123";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Build isolated Zotero/file/network doubles for observable workflow tests. */
@@ -37,6 +39,9 @@ function fixture(options = {}) {
     requests: [],
     timers: [],
     aborted: false,
+    chrome: 0,
+    activeChrome: 0,
+    maxChrome: 0,
   };
   let nextID = 1;
   let random = 0;
@@ -69,6 +74,12 @@ function fixture(options = {}) {
           if (key === this.path || key.startsWith(this.path + "/"))
             files.delete(key);
       },
+      moveTo(parent, name) {
+        const destination = parent.path + "/" + name;
+        files.set(destination, files.get(this.path));
+        files.delete(this.path);
+        this.path = destination;
+      },
     };
   }
   function parent(doi = DOI) {
@@ -97,13 +108,44 @@ function fixture(options = {}) {
     return item;
   }
   const subprocess = {
-    pathSearch: async () => {
+    pathSearch: async (name) => {
+      if (name !== "curl") {
+        if (options.chromeMissing) throw new Error("Chrome not found");
+        return "/system/chrome";
+      }
       if (options.curlMissing) throw new Error("curl executable not found");
       return "/system/curl";
     },
     async call(config) {
       if (options.launchDelay) await delay(options.launchDelay);
       const args = config.arguments;
+      if (args.includes("about:blank")) {
+        if (options.chromeLaunchDelay) await delay(options.chromeLaunchDelay);
+        stats.chrome++;
+        stats.activeChrome++;
+        stats.maxChrome = Math.max(stats.maxChrome, stats.activeChrome);
+        stats.chromeArguments = args;
+        let release;
+        let done = false;
+        const exited = new Promise((resolve) => {
+          release = resolve;
+        });
+        stats.exitChrome = () => {
+          if (!done) {
+            done = true;
+            stats.activeChrome--;
+            release({ exitCode: 0 });
+          }
+        };
+        return {
+          stdout: { readString: async () => "" },
+          wait: () => exited,
+          kill: async () => {
+            stats.aborted = true;
+            stats.exitChrome();
+          },
+        };
+      }
       const url = args.at(-1);
       const path = args[args.indexOf("--output") + 1];
       stats.requests.push({ url, command: config.command, args });
@@ -165,8 +207,98 @@ function fixture(options = {}) {
   const Zotero = {
     logError() {},
     Libraries: { userLibraryID: 1 },
+    DataDirectory: { dir: "/data" },
+    HTTP: {
+      request: async () => ({
+        responseText: JSON.stringify({
+          webSocketDebuggerUrl: "ws://127.0.0.1:45678/devtools/browser/owned",
+        }),
+      }),
+    },
     getMainWindow: () => ({
       URL,
+      location: { origin: "chrome://zotero" },
+      Components: {
+        classes: {
+          "@mozilla.org/network/server-socket;1": {
+            createInstance: () => ({ init() {}, port: 45678, close() {} }),
+          },
+        },
+      },
+      WebSocket: class {
+        constructor() {
+          setTimeout(() => this.onopen?.(), 0);
+          this.readyState = 1;
+        }
+        send(raw) {
+          const request = JSON.parse(raw);
+          stats.cdp ??= [];
+          stats.cdp.push(request);
+          let result = {};
+          if (request.method === "Browser.setDownloadBehavior")
+            stats.downloadDirectory = request.params.downloadPath;
+          if (request.method === "Target.createTarget")
+            result = { targetId: "owned" };
+          if (request.method === "Target.attachToTarget")
+            result = { sessionId: "session" };
+          if (request.method === "Runtime.evaluate") {
+            const value =
+              request.params.expression === "document.title"
+                ? "Just a moment..."
+                : options.chromeChallenge
+                  ? { title: "Just a moment..." }
+                  : {
+                      doi: options.pnasPageDOI ?? this.doi,
+                      pdf:
+                        options.pnasPDFURL ??
+                        "https://www.pnas.org/doi/pdf/" + this.doi,
+                      url: "https://www.pnas.org/doi/" + this.doi,
+                    };
+            result = { result: { value } };
+          }
+          if (request.method === "Page.navigate") {
+            const url = request.params.url;
+            if (!url.includes("/pdf/")) this.doi = url.split("/doi/")[1];
+            else if (!options.chromeHangPDF) {
+              const guid = "aaaaaaaa-0000-4000-8000-000000000001";
+              files.set(
+                stats.downloadDirectory + "/" + guid,
+                options.chromeHTML ? "<html>verification</html>" : PDF,
+              );
+              setTimeout(() => {
+                this.onmessage?.({
+                  data: JSON.stringify({
+                    method: "Browser.downloadWillBegin",
+                    params: { guid, url },
+                  }),
+                });
+                this.onmessage?.({
+                  data: JSON.stringify({
+                    method: "Browser.downloadProgress",
+                    params: { guid, state: "completed" },
+                  }),
+                });
+              }, 0);
+            }
+          }
+          setTimeout(
+            () =>
+              this.onmessage?.({
+                data: JSON.stringify({ id: request.id, result }),
+              }),
+            0,
+          );
+          if (request.method === "Browser.close")
+            setTimeout(() => {
+              stats.exitChrome();
+              this.close();
+            }, 0);
+        }
+        close() {
+          this.readyState = 3;
+          this.onclose?.();
+        }
+      },
       ChromeUtils: { importESModule: () => ({ Subprocess: subprocess }) },
       Services: { dirsvc: { get: () => file("/system") } },
       Ci: { nsIFile: {} },
@@ -188,7 +320,7 @@ function fixture(options = {}) {
       navigator: { userAgent: "test" },
       setTimeout(callback, ms) {
         stats.timers.push(ms);
-        return setTimeout(callback, ms / 200);
+        return setTimeout(callback, ms / (options.timerDivisor ?? 200));
       },
       clearTimeout,
     }),
@@ -287,7 +419,9 @@ test("early native failure invokes curl with one cookie jar and cleans temporary
   assert.ok(f.stats.requests.every((x) => x.args[0] === "--disable"));
   assert.ok(f.stats.requests.every((x) => x.args.at(-2) === "--"));
   assert.ok(result.timings.totalMs >= 0);
-  assert.ok(![...f.files.keys()].some((x) => x.startsWith("/temp/")));
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
+  );
 });
 
 test("15-second timer triggers publisher; a late native result cannot duplicate it", async () => {
@@ -299,7 +433,9 @@ test("15-second timer triggers publisher; a late native result cannot duplicate 
   await delay(140);
   assert.equal(f.stats.imports, 1);
   assert.equal(item.attachments.length, 1);
-  assert.ok(![...f.files.keys()].some((x) => x.startsWith("/temp/")));
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
+  );
 });
 
 test("late native success can win while fallback is pending", async () => {
@@ -310,7 +446,9 @@ test("late native success can win while fallback is pending", async () => {
   assert.ok(f.stats.requests.length > 0);
   await delay(200);
   assert.equal(f.stats.imports, 1);
-  assert.ok(![...f.files.keys()].some((x) => x.startsWith("/temp/")));
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
+  );
 });
 
 test("20-second fallback budget aborts the request and creates no attachment", async () => {
@@ -333,7 +471,9 @@ test("curl process launched after expiry is killed and cleans its private direct
   await delay(150);
   assert.equal(f.stats.aborted, true);
   assert.equal(f.stats.imports, 0);
-  assert.ok(![...f.files.keys()].some((x) => x.startsWith("/temp/")));
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
+  );
 });
 
 test("publisher DOI mismatch and HTML responses are rejected", async () => {
@@ -429,7 +569,11 @@ test("missing curl and curl HTTP errors retain the parent without attachments", 
     assert.equal(result.status, "failed");
     assert.match(result.message, /curl/);
     assert.equal(item.attachments.length, 0);
-    assert.ok(![...f.files.keys()].some((x) => x.startsWith("/temp/")));
+    assert.ok(
+      ![...f.files.keys()].some((x) =>
+        x.startsWith("/data/doi2pdf/downloads/"),
+      ),
+    );
   }
 });
 
@@ -457,4 +601,121 @@ test("invalid supplied PDF creates no metadata parent", async () => {
   });
   assert.equal(response[0], 400);
   assert.equal(f.stats.translations, 0);
+});
+
+test("PNAS browser fallback uses runtime data directory and imports one PDF", async () => {
+  const f = fixture({ nativeFailure: true, timerDivisor: 50 });
+  f.Zotero.DataDirectory.dir = "/selected/zotero";
+  const item = f.parent(PNAS_DOI);
+  const result = await f.api.findFullText(item);
+  assert.equal(result.source, "pnas");
+  assert.equal(f.stats.imports, 1);
+  assert.equal(f.stats.requests.length, 0);
+  assert.ok(
+    f.stats.chromeArguments.includes(
+      "--user-data-dir=/selected/zotero/doi2pdf/chrome_profile",
+    ),
+  );
+  assert.ok(f.stats.chromeArguments.includes("--remote-debugging-port=45678"));
+  assert.ok(!f.stats.chromeArguments.includes("--remote-debugging-port=0"));
+  assert.equal(f.stats.activeChrome, 0);
+  assert.ok(f.files.has("/selected/zotero/doi2pdf/chrome_profile"));
+  assert.ok(
+    ![...f.files.keys()].some((x) =>
+      x.startsWith("/selected/zotero/doi2pdf/downloads/"),
+    ),
+  );
+});
+
+test("PNAS failures retain metadata, close owned Chrome and clean downloads", async () => {
+  for (const options of [
+    { chromeMissing: true },
+    { chromeChallenge: true },
+    { chromeHangPDF: true },
+    { pnasPageDOI: "10.1073/pnas.wrong" },
+    { pnasPDFURL: "https://example.com/file.pdf" },
+    { chromeHTML: true },
+  ]) {
+    const f = fixture({ nativeFailure: true, timerDivisor: 50, ...options });
+    const item = f.parent(PNAS_DOI);
+    const result = await f.api.findFullText(item);
+    assert.equal(result.status, "failed");
+    assert.equal(item.attachments.length, 0);
+    if (options.chromeMissing) assert.equal(result.code, "CHROME_NOT_FOUND");
+    if (options.chromeChallenge || options.chromeHangPDF)
+      assert.equal(result.code, "NEEDS_BROWSER_ACCESS");
+    await delay(15);
+    assert.equal(f.stats.activeChrome, 0);
+    assert.ok(
+      ![...f.files.keys()].some((x) =>
+        x.startsWith("/data/doi2pdf/downloads/"),
+      ),
+    );
+  }
+});
+
+test("different PNAS parents serialize shared profile work without duplicate imports", async () => {
+  const f = fixture({ nativeFailure: true, timerDivisor: 50 });
+  const results = await Promise.all([
+    f.api.findFullText(f.parent(PNAS_DOI)),
+    f.api.findFullText(f.parent("10.1073/pnas.1234567890")),
+  ]);
+  assert.ok(results.every((result) => result.source === "pnas"));
+  assert.equal(f.stats.maxChrome, 1);
+  assert.equal(f.stats.imports, 2);
+});
+
+test("PNAS starts after 15 seconds and late native completion creates no extra PDF", async () => {
+  const f = fixture({ nativeDelay: 650, timerDivisor: 50 });
+  const item = f.parent(PNAS_DOI);
+  const result = await f.api.findFullText(item);
+  assert.equal(result.source, "pnas");
+  assert.ok(f.stats.timers.includes(15000));
+  await delay(700);
+  assert.equal(f.stats.imports, 1);
+  assert.equal(item.attachments.length, 1);
+});
+
+test("PNAS late Chrome startup is killed and its task files are discarded", async () => {
+  const f = fixture({
+    nativeFailure: true,
+    chromeLaunchDelay: 500,
+    timerDivisor: 50,
+  });
+  const result = await f.api.findFullText(f.parent(PNAS_DOI));
+  assert.equal(result.status, "failed");
+  await delay(150);
+  assert.equal(f.stats.activeChrome, 0);
+  assert.equal(f.stats.imports, 0);
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
+  );
+});
+
+test("PNAS Nexus is not routed to the main-journal browser fallback", async () => {
+  const f = fixture({ nativeFailure: true });
+  await f.api.findFullText(f.parent("10.1093/pnasnexus/pgaf001"));
+  assert.equal(f.stats.chrome, 0);
+});
+
+test("stopping the addon cancels active PNAS tasks but preserves the profile", async () => {
+  const f = fixture({
+    nativeFailure: true,
+    chromeChallenge: true,
+    timerDivisor: 50,
+  });
+  const pending = f.api.findFullText(f.parent(PNAS_DOI));
+  await delay(60);
+  f.api.stopPNASDownloads();
+  const result = await pending;
+  assert.equal(result.status, "failed");
+  await delay(30);
+  assert.equal(f.stats.activeChrome, 0);
+  assert.equal(f.stats.imports, 0);
+  assert.ok(f.files.has("/data/doi2pdf/chrome_profile"));
+  assert.ok(
+    ![...f.files.keys()].some((path) =>
+      path.startsWith("/data/doi2pdf/downloads/"),
+    ),
+  );
 });

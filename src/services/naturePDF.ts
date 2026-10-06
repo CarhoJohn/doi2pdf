@@ -1,16 +1,9 @@
 import { normalizeDOI, IdentifierError } from "./identifier";
-import { createPDFTemp, validatePDF } from "./pdf";
+import { createPDFTemp, validatePDF, PDFCandidate } from "./pdf";
+export type { PDFCandidate } from "./pdf";
 
 /** Whole Nature fallback budget, including process startup and both requests. */
 export const NATURE_TIMEOUT_MS = 20_000;
-
-export interface PDFCandidate {
-  path: string;
-  source: "native" | "nature";
-  url?: string;
-  timings?: { articleMs: number; pdfMs: number; totalMs: number };
-  cleanup: () => void;
-}
 
 interface CurlProcess {
   stdout: { readString: () => Promise<string> };

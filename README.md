@@ -7,7 +7,7 @@
 
 ## 版本与来源
 
-当前本地开发版本为 `0.1.3`。本项目基于
+当前本地开发版本为 `0.1.4`。本项目基于
 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
 的 `v0.2.1` 版本继续开发。
 
@@ -130,6 +130,30 @@ Collection 不存在，插件会在首次添加时自动创建。设置值支持
 整个备用流程的超时为 20 秒。15 秒从父条目确定后开始计时，不包含元数据查询
 时间，也不表示整个 API 请求必须在 15 秒内返回。
 
+PNAS 主刊（`10.1073/pnas.*`）沿用相同的触发条件，并改用已安装的 Google
+Chrome 获取官网文章和正文 PDF。插件通过本地 CDP 连接操作独立浏览器，不需要
+Node、Playwright 或额外下载浏览器。它使用非零调试端口，不启用 headless，
+不修改网页中的浏览器标记；可能会显示专用 Chrome 窗口。
+先核对官网元数据中的 DOI，再访问 `citation_pdf_url` 对应的 `/doi/pdf/` 地址，
+通过 Chrome 原生下载事件确认文件完成，并校验 PDF 文件头。
+整个 PNAS 备用任务的 20 秒预算包含等待其他 PNAS 任务、Chrome 启动及下载。
+不同条目共用一个专用 profile，任务串行运行；同一条目继续共享全文任务。
+PNAS Nexus 使用不同平台，本版本未加入其出版社专用兜底。
+
+运行数据目录在插件运行时从 `Zotero.DataDirectory.dir` 读取，即 Zotero 设置中的
+数据目录；构建和 XPI 中不包含开发机器的数据路径。目录结构为：
+
+```text
+<Zotero 数据目录>/doi2pdf/
+  chrome_profile/       Chrome 配置、Cookie 和缓存，跨任务与插件升级保留
+  downloads/            各下载任务的独立暂存目录，完成或失败后清理
+```
+
+原生下载、Nature curl 和 PNAS Chrome 的暂存文件均使用该目录。
+每次任务只清理自己的下载目录；不会删除 Chrome profile、文献数据库或已有附件。
+修改 Zotero 数据目录并重启后，新任务会使用新的路径，旧目录不自动迁移或删除。
+插件的设置项继续由 Zotero 的偏好设置系统管理；Chrome 自身的配置位于上述 profile。
+
 两条下载路线先保存临时文件，再统一导入附件；即使常规路线晚到，也只保存一份
 PDF。并发的同一 DOI 导入会共享元数据创建任务，同一条目的全文请求也会共享
 下载任务。已有可访问的 PDF 会直接复用，网页快照和丢失的文件不算成功。
@@ -171,13 +195,16 @@ PDF。并发的同一 DOI 导入会共享元数据创建任务，同一条目的
 
 下载异常或备用流程超时时为 `failed`，原因位于 `fullText.message`。外层
 `status: "success"` 只表示元数据处理成功。成功结果的 `fullText.source` 会标明
-`existing`、`native`、`nature` 或 `local`；自动获取结果还包含 `attempts` 诊断。
-Nature 下载成功时，`fullText.timings` 包含 `articleMs`、`pdfMs` 和 `totalMs`，
+`existing`、`native`、`nature`、`pnas` 或 `local`；自动获取结果还包含 `attempts` 诊断。
+Nature 或 PNAS 下载成功时，`fullText.timings` 包含 `articleMs`、`pdfMs` 和 `totalMs`，
 均以毫秒表示；总时间包括进程启动、网页解析和文件校验，不包含附件入库。
 系统缺少 curl、curl 返回错误或下载超时时，保留元数据条目并报告失败原因。
-临时下载使用系统临时目录中的独立 `doi2pdf-*` 目录，导入后或失败后清理；仍在
+PNAS 未安装 Chrome 时返回 `fullText.code: "CHROME_NOT_FOUND"`；检测到验证页且
+20 秒内未完成时返回 `NEEDS_BROWSER_ACCESS`，其他超时为 `PNAS_TIMEOUT`。
+profile 被占用或启动失败也会保留元数据并报告原因；浏览器方式不保证绕过网站验证。
+临时下载使用上述 `downloads` 下的独立 `doi2pdf-*` 目录，导入后或失败后清理；仍在
 运行的晚到下载在结束后清理，绝不会再次导入附件。超时会终止本次任务启动的
-curl 子进程，Cookie 文件随该任务的临时目录一并删除。
+curl 或 Chrome 子进程；任务 Cookie 文件清理，Chrome profile 中的会话保留。
 
 ### 向已有条目导入 PDF
 
@@ -216,8 +243,8 @@ Content-Type: application/json
 
 `methods` 可选；省略时使用 Zotero 默认的全文解析顺序。
 
-Nature 文献也会使用上述 15 秒触发、20 秒超时的官网备用路线。`methods` 仅
-控制常规 Zotero 解析器，不会禁用 Nature 备用路线。
+Nature 和 PNAS 主刊文献也会使用上述 15 秒触发、20 秒超时的官网备用路线。
+`methods` 仅控制常规 Zotero 解析器，不会禁用出版社备用路线。
 
 ## 安装
 
@@ -263,7 +290,7 @@ npm run build
 .scaffold/build/doi2pdf-v<version>.xpi
 ```
 
-例如，当前版本的文件名为 `doi2pdf-v0.1.3.xpi`。文件名即为构建版本；也可以
+例如，当前版本的文件名为 `doi2pdf-v0.1.4.xpi`。文件名即为构建版本；也可以
 读取 `.scaffold/build/addon/manifest.json` 的 `version` 字段确认。
 
 这是可以交给 Zotero 安装的发布包，不要直接把源码目录或
@@ -271,7 +298,7 @@ npm run build
 插件入口脚本：
 
 ```powershell
-tar -tf .scaffold/build/doi2pdf-v0.1.3.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
+tar -tf .scaffold/build/doi2pdf-v0.1.4.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
 ```
 
 手动安装本地构建包：
