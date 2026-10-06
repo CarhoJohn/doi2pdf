@@ -7,7 +7,7 @@
 
 ## 版本与来源
 
-当前本地开发版本为 `0.1.2`。本项目基于
+当前本地开发版本为 `0.1.3`。本项目基于
 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
 的 `v0.2.1` 版本继续开发。
 
@@ -22,6 +22,13 @@
 - 易于与其他工具和脚本集成
 
 ## API 端点
+
+在实测的 Zotero 10.0.5 中，POST 接口继承 Zotero 本地 API 的写入认证要求。
+先 GET `/api/plus`，读取响应头 `Zotero-Server-ID`；再通过 Zotero 原生
+`POST /api/local/authorize`（JSON：`{"appName":"你的应用名"}`）获取 API key。
+后续 POST 请求携带 `Zotero-Server-ID` 和 `Zotero-API-Key` 请求头。
+选择一次性授权时，key 在一次写入请求中消耗；选择始终允许时可以复用。
+插件遵循当前 Zotero 的认证规则；浏览器 User-Agent 请求还可能被原生服务拒绝。
 
 ### 健康检查
 
@@ -115,6 +122,35 @@ Short Title；未传入或传入空字符串时不会改动该字段。
 Collection 不存在，插件会在首次添加时自动创建。设置值支持使用
 父级/子级表示嵌套 Collection。
 
+`add-doi` 先保存或复用元数据，再单独获取 PDF。对于 Nature 文献，常规
+获取提前失败时立即启动官网备用下载；常规获取开始后 15 秒仍未成功时也会
+启动备用下载。备用流程由插件直接调用系统 curl：Windows 使用系统目录中的
+`curl.exe`，其他系统在 PATH 中查找 `curl`。不经过 shell，不需要外部脚本。
+同一次下载使用独立的临时 Cookie 文件访问文章页和正文 PDF，
+整个备用流程的超时为 20 秒。15 秒从父条目确定后开始计时，不包含元数据查询
+时间，也不表示整个 API 请求必须在 15 秒内返回。
+
+两条下载路线先保存临时文件，再统一导入附件；即使常规路线晚到，也只保存一份
+PDF。并发的同一 DOI 导入会共享元数据创建任务，同一条目的全文请求也会共享
+下载任务。已有可访问的 PDF 会直接复用，网页快照和丢失的文件不算成功。
+官网访问仍需要当前网络具备相应的开放获取或机构访问权限。
+
+也可以提供 Zotero 所在电脑上已有的 PDF，直接跳过网络全文查找：
+
+```json
+{
+  "doi": "10.1038/s42256-026-01281-1",
+  "collectionKey": "ABC12345",
+  "pdfPath": "E:/Downloads/s42256-026-01281-1.pdf",
+  "findFullText": false
+}
+```
+
+`pdfPath` 必须是本机可读的绝对路径，文件会复制到 Zotero 附件存储，原文件
+不会删除。显式提供 `pdfPath` 时，无论 `findFullText` 的值是什么，均优先导入
+该文件；文件校验失败时返回错误。有效 PDF 文件头只能证明文件类型，手动提供
+文件时仍需确保内容对应所填 DOI。
+
 #### 响应
 
 ```json
@@ -133,6 +169,37 @@ Collection 不存在，插件会在首次添加时自动创建。设置值支持
 
 全文不可用时，`fullText.status` 为 `not_found`，元数据条目仍会保留。
 
+下载异常或备用流程超时时为 `failed`，原因位于 `fullText.message`。外层
+`status: "success"` 只表示元数据处理成功。成功结果的 `fullText.source` 会标明
+`existing`、`native`、`nature` 或 `local`；自动获取结果还包含 `attempts` 诊断。
+Nature 下载成功时，`fullText.timings` 包含 `articleMs`、`pdfMs` 和 `totalMs`，
+均以毫秒表示；总时间包括进程启动、网页解析和文件校验，不包含附件入库。
+系统缺少 curl、curl 返回错误或下载超时时，保留元数据条目并报告失败原因。
+临时下载使用系统临时目录中的独立 `doi2pdf-*` 目录，导入后或失败后清理；仍在
+运行的晚到下载在结束后清理，绝不会再次导入附件。超时会终止本次任务启动的
+curl 子进程，Cookie 文件随该任务的临时目录一并删除。
+
+### 向已有条目导入 PDF
+
+```
+POST /api/plus/import-pdf
+Content-Type: application/json
+```
+
+```json
+{
+  "itemKey": "ABC12345",
+  "expectedDOI": "10.1038/s42256-026-01281-1",
+  "pdfPath": "E:/Downloads/s42256-026-01281-1.pdf"
+}
+```
+
+三个字段均必填。接口只在用户库中查找指定父条目，绝不会创建新的文献条目。
+条目不存在或已删除时返回 `ITEM_NOT_FOUND`；父条目 DOI 不匹配时返回
+`DOI_MISMATCH`；路径或文件无效时返回 `INVALID_PDF`。已有可访问的 PDF 时
+返回已有附件，不覆盖它。导入成功返回 `itemID`、`itemKey` 和包含附件 ID/key
+的 `fullText`。本接口不改动父条目的元数据或收藏夹。
+
 ### 为已有条目查找全文 (新增功能)
 
 ```
@@ -148,6 +215,9 @@ Content-Type: application/json
 ```
 
 `methods` 可选；省略时使用 Zotero 默认的全文解析顺序。
+
+Nature 文献也会使用上述 15 秒触发、20 秒超时的官网备用路线。`methods` 仅
+控制常规 Zotero 解析器，不会禁用 Nature 备用路线。
 
 ## 安装
 
@@ -193,7 +263,7 @@ npm run build
 .scaffold/build/doi2pdf-v<version>.xpi
 ```
 
-例如，当前版本的文件名为 `doi2pdf-v0.1.2.xpi`。文件名即为构建版本；也可以
+例如，当前版本的文件名为 `doi2pdf-v0.1.3.xpi`。文件名即为构建版本；也可以
 读取 `.scaffold/build/addon/manifest.json` 的 `version` 字段确认。
 
 这是可以交给 Zotero 安装的发布包，不要直接把源码目录或
@@ -201,7 +271,7 @@ npm run build
 插件入口脚本：
 
 ```powershell
-tar -tf .scaffold/build/doi2pdf-v0.1.2.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
+tar -tf .scaffold/build/doi2pdf-v0.1.3.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
 ```
 
 手动安装本地构建包：
@@ -219,6 +289,12 @@ tar -tf .scaffold/build/doi2pdf-v0.1.2.xpi | Select-String '^(bootstrap.js|manif
 
 ```bash
 npm run lint:check
+```
+
+离线回归测试（不会启动 Zotero 或修改文献库）：
+
+```bash
+npm run test:unit
 ```
 
 ## 许可证

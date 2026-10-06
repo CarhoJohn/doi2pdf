@@ -7,6 +7,7 @@ import hooks from "./hooks";
 import { createZToolkit } from "./utils/ztoolkit";
 import { AddDOIEndpoint } from "./endpoints/addDOI";
 import { FindFullTextEndpoint } from "./endpoints/findFullText";
+import { ImportPDFEndpoint } from "./endpoints/importPDF";
 import { resolveDestinationCollection } from "./services/identifier";
 
 // 定义 AddItemEndpoint 类
@@ -182,6 +183,7 @@ class Addon {
       Zotero.Server.LocalAPI.AddDOIEndpoint;
     Zotero.Server.Endpoints["/api/plus/find-fulltext"] =
       Zotero.Server.LocalAPI.FindFullTextEndpoint;
+    Zotero.Server.Endpoints["/api/plus/import-pdf"] = ImportPDFEndpoint;
     Zotero.Server.Endpoints["/api/plus"] = Zotero.Server.LocalAPI.Plus;
     Zotero.Server.Endpoints["/api/plus/selected-collection"] =
       Zotero.Server.LocalAPI.GetSelectedCollectionEndpoint;
@@ -194,6 +196,7 @@ class Addon {
     delete Zotero.Server.Endpoints["/api/plus/add-item-by-id"];
     delete Zotero.Server.Endpoints["/api/plus/add-doi"];
     delete Zotero.Server.Endpoints["/api/plus/find-fulltext"];
+    delete Zotero.Server.Endpoints["/api/plus/import-pdf"];
     delete Zotero.Server.Endpoints["/api/plus/selected-collection"];
     delete Zotero.Server.Endpoints["/api/plus"];
   }

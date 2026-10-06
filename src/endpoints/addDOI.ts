@@ -1,13 +1,13 @@
 import { errorResponse, jsonResponse } from "./helpers";
 import {
-  addByIdentifier,
-  findItemByDOI,
+  getOrCreateDOIItem,
   IdentifierError,
   normalizeDOI,
   resolveDestinationCollection,
   summarizeItem,
 } from "../services/identifier";
 import { findFullText } from "../services/fullText";
+import { importPDF, validatePDF } from "../services/pdf";
 
 /** HTTP endpoint for idempotent DOI ingestion and optional full-text lookup. */
 export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
@@ -17,8 +17,10 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
   /**
    * Add or reuse a DOI item and optionally resolve its full text.
    *
-   * @param req Zotero local API request.
-   * @returns HTTP response tuple.
+   * Args:
+   *   req: JSON request with DOI, destination, and optional local PDF path.
+   * Returns:
+   *   HTTP response tuple containing the parent and PDF result.
    */
   async run(req: {
     data?: {
@@ -27,13 +29,13 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
       findFullText?: unknown;
       methods?: unknown;
       shortTitle?: unknown;
+      pdfPath?: unknown;
     };
   }) {
     try {
       const doi = normalizeDOI(req.data?.doi);
       if (!doi) throw new IdentifierError("INVALID_DOI", "Could not parse DOI");
       const collectionKey = req.data?.collectionKey;
-      const collections = await resolveDestinationCollection(collectionKey);
       const shouldFindFullText = req.data?.findFullText !== false;
       if (
         req.data?.findFullText !== undefined &&
@@ -59,11 +61,19 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
         methods = req.data.methods as string[];
       }
 
-      let item = await findItemByDOI(doi);
-      const created = !item;
-      if (!item) {
-        item = await addByIdentifier(doi, collectionKey as string | undefined);
-      } else if (collections !== false) {
+      const pdfPath = req.data?.pdfPath;
+      if (pdfPath !== undefined) {
+        if (typeof pdfPath !== "string" || !pdfPath.trim()) {
+          throw new IdentifierError(
+            "INVALID_PDF",
+            "pdfPath must be a nonempty string",
+          );
+        }
+        await validatePDF(pdfPath);
+      }
+      const collections = await resolveDestinationCollection(collectionKey);
+      const { item, created } = await getOrCreateDOIItem(doi, collectionKey);
+      if (!created && collections !== false) {
         item.addToCollection(collections[0]);
         await item.saveTx();
       }
@@ -75,9 +85,21 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
         await item.saveTx();
       }
 
-      const fullText = shouldFindFullText
-        ? await findFullText(item, methods)
-        : { status: "skipped" as const };
+      // An explicit PDF bypasses network lookup and is attached to this exact parent.
+      let fullText;
+      if (typeof pdfPath === "string") {
+        const attachment = await importPDF(item, pdfPath, doi);
+        fullText = {
+          status: "found" as const,
+          source: "local" as const,
+          attachmentID: attachment.id,
+          attachmentKey: attachment.key,
+        };
+      } else {
+        fullText = shouldFindFullText
+          ? await findFullText(item, methods)
+          : { status: "skipped" as const };
+      }
       return jsonResponse(200, {
         status: "success",
         item: summarizeItem(item),

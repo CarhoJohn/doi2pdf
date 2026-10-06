@@ -1,7 +1,7 @@
 {
   "name": "doi2pdf",
   "type": "module",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "More features for Zotero Local API",
   "config": {
     "addonName": "doi2pdf",
@@ -27,6 +27,7 @@
     "lint:fix": "prettier --write . && eslint . --fix",
     "release": "zotero-plugin release",
     "test": "zotero-plugin test",
+    "test:unit": "node --test test/pdf.unit.test.mjs",
     "update-deps": "npm update --save"
   },
   "dependencies": {

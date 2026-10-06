@@ -159,13 +159,17 @@ export async function resolveDestinationCollection(
 /**
  * Add a single identifier through Zotero's built-in translator.
  *
- * @param identifier DOI, ISBN, PMID, or another Zotero-supported identifier.
- * @param collectionKey Optional destination collection key.
- * @returns The created regular item.
+ * Args:
+ *   identifier: DOI, ISBN, PMID, or another Zotero-supported identifier.
+ *   collectionKey: Optional destination collection key.
+ *   saveAttachments: Whether translators may download attachments.
+ * Returns:
+ *   The created regular item.
  */
 export async function addByIdentifier(
   identifier: string,
   collectionKey?: unknown,
+  saveAttachments = true,
 ): Promise<Zotero.Item> {
   const identifiers = Zotero.Utilities.extractIdentifiers(identifier);
   if (!identifiers.length) {
@@ -190,7 +194,7 @@ export async function addByIdentifier(
   const items = await translate.translate({
     libraryID: Zotero.Libraries.userLibraryID,
     collections,
-    saveAttachments: true,
+    saveAttachments,
   });
   const item = (items as Zotero.Item[]).find(
     (candidate) => !candidate.isAttachment?.() && !candidate.isNote?.(),
@@ -199,6 +203,41 @@ export async function addByIdentifier(
     throw new IdentifierError("LOOKUP_FAILED", "No item was created");
   }
   return item;
+}
+
+/** Pending metadata imports are shared to prevent duplicate DOI parents. */
+const doiImports = new Map<
+  string,
+  Promise<{ item: Zotero.Item; created: boolean }>
+>();
+
+/**
+ * Find or create metadata without starting attachment downloads.
+ *
+ * Args:
+ *   doi: Normalized DOI to resolve.
+ *   collectionKey: Optional destination collection key.
+ * Returns:
+ *   The parent and whether this caller created it.
+ */
+export async function getOrCreateDOIItem(doi: string, collectionKey?: unknown) {
+  const pending = doiImports.get(doi);
+  if (pending) return { item: (await pending).item, created: false };
+  const operation = (async () => {
+    const existing = await findItemByDOI(doi);
+    if (existing) return { item: existing, created: false };
+    // PDF retrieval starts later, after the parent identity is stable.
+    return {
+      item: await addByIdentifier(doi, collectionKey, false),
+      created: true,
+    };
+  })();
+  doiImports.set(doi, operation);
+  try {
+    return await operation;
+  } finally {
+    doiImports.delete(doi);
+  }
 }
 
 /**
