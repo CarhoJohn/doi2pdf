@@ -1,5 +1,5 @@
 import { normalizeDOI, IdentifierError } from "./identifier";
-import { createPDFTemp, validatePDF, PDFCandidate } from "./pdf";
+import { createPDFTemp, stagePDF, validatePDF, PDFCandidate } from "./pdf";
 import { DownloadTask } from "./downloadTask";
 import { DownloadProcess, DownloadSubprocess, readOutput } from "./subprocess";
 
@@ -129,8 +129,7 @@ export async function downloadNaturePDF(
     return { url: finalURL.trim(), ms: Date.now() - begin };
   }
 
-  const operation = (async (): Promise<PDFCandidate> => {
-    let succeeded = false;
+  const operation = stagePDF(temporary, async (): Promise<PDFCandidate> => {
     try {
       ({ Subprocess: subprocess } = win.ChromeUtils.importESModule(
         "resource://gre/modules/Subprocess.sys.mjs",
@@ -182,7 +181,6 @@ export async function downloadNaturePDF(
       const pdf = await request(pdfURL.href, temporary.path);
       await validatePDF(temporary.path);
       task.check();
-      succeeded = true;
       return {
         ...temporary,
         source: "nature",
@@ -196,8 +194,7 @@ export async function downloadNaturePDF(
     } finally {
       // A killed process releases files before cleanup; late results never import.
       if (process) await process.kill(0).catch(Zotero.logError);
-      if (!succeeded) temporary.cleanup();
     }
-  })();
+  });
   return task.run(operation);
 }

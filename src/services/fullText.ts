@@ -1,6 +1,7 @@
 import { normalizeDOI } from "./identifier";
 import {
   createPDFTemp,
+  stagePDF,
   getPDFAttachment,
   importPDF,
   validatePDF,
@@ -67,8 +68,7 @@ async function downloadNativePDF(
   isClosed: () => boolean,
 ): Promise<PDFCandidate | undefined> {
   const temporary = createPDFTemp("native");
-  let succeeded = false;
-  try {
+  return stagePDF(temporary, async () => {
     const native = Zotero.Attachments as unknown as NativeDownloader;
     const resolver = native.getFileResolvers ?? native.getPDFResolvers;
     const result = await native.downloadFirstAvailableFile(
@@ -88,11 +88,8 @@ async function downloadNativePDF(
     );
     if (!result || !result.url) return undefined;
     await validatePDF(temporary.path);
-    succeeded = true;
     return { ...temporary, source: "native", url: result.url };
-  } finally {
-    if (!succeeded) temporary.cleanup();
-  }
+  });
 }
 
 /**

@@ -168,3 +168,26 @@ export function createPDFTemp(source: string) {
     },
   };
 }
+
+/**
+ * Transfer temporary-file ownership only after download and teardown succeed.
+ *
+ * Args:
+ *   temporary: Private files allocated for this route.
+ *   operation: Download and validation; release processes before it settles.
+ * Returns:
+ *   The candidate owned by the caller, or undefined after cleaning a miss.
+ */
+export async function stagePDF<T extends PDFCandidate | undefined>(
+  temporary: ReturnType<typeof createPDFTemp>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let candidate: T | undefined;
+  try {
+    candidate = await operation();
+    return candidate;
+  } finally {
+    // Exceptions, including teardown failures, must not leave task directories.
+    if (!candidate) temporary.cleanup();
+  }
+}
