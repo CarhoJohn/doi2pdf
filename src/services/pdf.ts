@@ -102,6 +102,7 @@ export async function importPDF(
   sourceURL?: string,
 ): Promise<Zotero.Item> {
   const key = `${item.libraryID}/${item.key}`;
+  const doi = normalizeDOI(expectedDOI);
   // Await another writer, then recheck the file and parent independently.
   while (imports.has(key)) {
     await imports.get(key)!.catch(() => undefined);
@@ -113,8 +114,7 @@ export async function importPDF(
     }
     if (
       expectedDOI !== undefined &&
-      (!normalizeDOI(expectedDOI) ||
-        normalizeDOI(parent.getField("DOI")) !== normalizeDOI(expectedDOI))
+      (!doi || normalizeDOI(parent.getField("DOI")) !== doi)
     ) {
       throw new IdentifierError(
         "DOI_MISMATCH",

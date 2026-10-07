@@ -227,10 +227,19 @@ function fixture(options = {}) {
       },
       WebSocket: class {
         constructor() {
-          setTimeout(() => this.onopen?.(), 0);
-          this.readyState = 1;
+          this.readyState = 0;
+          if (!options.chromeConnectionHang)
+            setTimeout(() => {
+              if (this.readyState !== 0) return;
+              this.readyState = 1;
+              this.onopen?.();
+            }, 0);
         }
         send(raw) {
+          if (options.chromeSendFailure) {
+            options.chromeSendFailure = false;
+            throw new Error("Chrome socket send failed");
+          }
           const request = JSON.parse(raw);
           stats.cdp ??= [];
           stats.cdp.push(request);
@@ -635,6 +644,7 @@ test("PNAS failures retain metadata, close owned Chrome and clean downloads", as
     { pnasPageDOI: "10.1073/pnas.wrong" },
     { pnasPDFURL: "https://example.com/file.pdf" },
     { chromeHTML: true },
+    { chromeSendFailure: true },
   ]) {
     const f = fixture({ nativeFailure: true, timerDivisor: 50, ...options });
     const item = f.parent(PNAS_DOI);
@@ -717,5 +727,50 @@ test("stopping the addon cancels active PNAS tasks but preserves the profile", a
     ![...f.files.keys()].some((path) =>
       path.startsWith("/data/doi2pdf/downloads/"),
     ),
+  );
+});
+
+test("canceling a connecting Chrome socket releases the PNAS queue", async () => {
+  const options = {
+    nativeFailure: true,
+    chromeConnectionHang: true,
+    timerDivisor: 50,
+  };
+  const f = fixture(options);
+  const pending = f.api.findFullText(f.parent(PNAS_DOI));
+  await delay(30);
+  assert.equal(f.stats.activeChrome, 1);
+  f.api.stopPNASDownloads();
+  assert.equal((await pending).status, "failed");
+  options.chromeConnectionHang = false;
+  const result = await f.api.findFullText(f.parent(PNAS_DOI));
+  assert.equal(result.source, "pnas");
+  assert.equal(f.stats.imports, 1);
+  assert.equal(f.stats.maxChrome, 1);
+  assert.equal(f.stats.activeChrome, 0);
+});
+
+test("shutdown cancels queued PNAS tasks without launching another Chrome", async () => {
+  const options = {
+    nativeFailure: true,
+    chromeChallenge: true,
+    timerDivisor: 50,
+  };
+  const f = fixture(options);
+  const first = f.api.findFullText(f.parent(PNAS_DOI));
+  const queued = f.api.findFullText(f.parent("10.1073/pnas.1234567890"));
+  await delay(30);
+  f.api.stopPNASDownloads();
+  assert.ok(
+    (await Promise.all([first, queued])).every((x) => x.status === "failed"),
+  );
+  options.chromeChallenge = false;
+  assert.equal((await f.api.findFullText(f.parent(PNAS_DOI))).source, "pnas");
+  assert.equal(f.stats.chrome, 2);
+  assert.equal(f.stats.maxChrome, 1);
+  assert.equal(f.stats.imports, 1);
+  assert.equal(f.stats.activeChrome, 0);
+  assert.ok(
+    ![...f.files.keys()].some((x) => x.startsWith("/data/doi2pdf/downloads/")),
   );
 });

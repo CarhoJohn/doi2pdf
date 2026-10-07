@@ -1,24 +1,18 @@
 import { normalizeDOI, IdentifierError } from "./identifier";
 import { createPDFTemp, validatePDF, PDFCandidate } from "./pdf";
-export type { PDFCandidate } from "./pdf";
+import { DownloadTask } from "./downloadTask";
+import { DownloadProcess, DownloadSubprocess, readOutput } from "./subprocess";
 
-/** Whole Nature fallback budget, including process startup and both requests. */
-export const NATURE_TIMEOUT_MS = 20_000;
-
-interface CurlProcess {
-  stdout: { readString: () => Promise<string> };
-  stderr: { readString: () => Promise<string> };
-  wait: () => Promise<{ exitCode: number }>;
-  kill: (timeout: number) => Promise<unknown>;
-}
-
-interface SubprocessAPI {
-  pathSearch: (name: string) => Promise<string>;
-  call: (options: {
-    command: string;
-    arguments: string[];
-    stderr: string;
-  }) => Promise<CurlProcess>;
+/**
+ * Recognize Nature's publisher domains for article and PDF URL checks.
+ *
+ * Args:
+ *   host: Parsed URL hostname.
+ * Returns:
+ *   Whether the hostname belongs to nature.com.
+ */
+function isNatureHost(host: string): boolean {
+  return host === "nature.com" || host.endsWith(".nature.com");
 }
 
 /**
@@ -35,25 +29,10 @@ export function canFetchNaturePDF(item: Zotero.Item): boolean {
   try {
     const host = new (Zotero.getMainWindow().URL)(String(item.getField("url")))
       .hostname;
-    return host === "nature.com" || host.endsWith(".nature.com");
+    return isNatureHost(host);
   } catch {
     return false;
   }
-}
-
-/**
- * Read a subprocess pipe to EOF so neither stdout nor stderr can block curl.
- *
- * Args:
- *   pipe: UTF-8 output pipe owned by this curl process.
- * Returns:
- *   The complete output.
- */
-async function readOutput(pipe: CurlProcess["stdout"]): Promise<string> {
-  let output = "";
-  let chunk: string;
-  while ((chunk = await pipe.readString())) output += chunk;
-  return output;
 }
 
 /**
@@ -72,17 +51,20 @@ export async function downloadNaturePDF(
     throw new IdentifierError("INVALID_DOI", "Nature lookup requires a DOI");
   const win = Zotero.getMainWindow();
   const temporary = createPDFTemp("nature");
-  const started = Date.now();
-  const deadline = started + NATURE_TIMEOUT_MS;
   const directory = Zotero.File.pathToFile(temporary.path).parent!;
   const article = directory.clone();
   article.append("article.html");
   const cookies = directory.clone();
   cookies.append("cookies.txt");
-  let expired = false;
-  let process: CurlProcess | undefined;
-  let subprocess: SubprocessAPI;
+  let process: DownloadProcess | undefined;
+  let subprocess: DownloadSubprocess;
   let command: string;
+  const task = new DownloadTask(
+    () => {
+      if (process) void process.kill(0).catch(Zotero.logError);
+    },
+    () => new Error("Nature fallback timed out after 20 seconds"),
+  );
 
   /**
    * Invoke curl with separate arguments and the remaining shared time budget.
@@ -94,9 +76,7 @@ export async function downloadNaturePDF(
    *   The final URL after redirects and this request's elapsed milliseconds.
    */
   async function request(url: string, path: string) {
-    const remaining = (deadline - Date.now()) / 1000;
-    if (expired || remaining <= 0)
-      throw new Error("Nature fallback timed out after 20 seconds");
+    const remaining = task.check() / 1000;
     const begin = Date.now();
     // --disable must be first: ignore user curlrc files. Cookies are task-local.
     // Gecko's Subprocess launches Windows processes with CREATE_NO_WINDOW.
@@ -133,15 +113,15 @@ export async function downloadNaturePDF(
     });
     process = child;
     // Process startup may complete after the shared timer has already fired.
-    if (expired) await child.kill(0);
+    if (task.error) await child.kill(0);
     const [finalURL, errors, result] = await Promise.all([
       readOutput(child.stdout),
-      readOutput(child.stderr),
+      readOutput(child.stderr!),
       child.wait(),
     ]);
     process = undefined;
-    if (expired || result.exitCode === 28)
-      throw new Error("Nature fallback timed out after 20 seconds");
+    if (result.exitCode === 28) task.cancel();
+    task.check();
     if (result.exitCode !== 0)
       throw new Error(
         "curl failed (" + result.exitCode + "): " + errors.trim().slice(0, 500),
@@ -149,22 +129,12 @@ export async function downloadNaturePDF(
     return { url: finalURL.trim(), ms: Date.now() - begin };
   }
 
-  let timer: number | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = win.setTimeout(() => {
-      expired = true;
-      // Terminate only the child launched by this download task.
-      if (process)
-        void process.kill(0).catch((error) => Zotero.logError(error));
-      reject(new Error("Nature fallback timed out after 20 seconds"));
-    }, NATURE_TIMEOUT_MS);
-  });
   const operation = (async (): Promise<PDFCandidate> => {
     let succeeded = false;
     try {
       ({ Subprocess: subprocess } = win.ChromeUtils.importESModule(
         "resource://gre/modules/Subprocess.sys.mjs",
-      ) as unknown as { Subprocess: SubprocessAPI });
+      ) as unknown as { Subprocess: DownloadSubprocess });
       if (Zotero.isWin) {
         // Use Windows' absolute system executable path, never a shell or cwd.
         const executable = win.Services.dirsvc
@@ -180,16 +150,9 @@ export async function downloadNaturePDF(
         command = await subprocess.pathSearch("curl");
       }
       // Resolve the publisher URL through DOI redirects instead of guessing its path.
-      const articleURL = "https://doi.org/" + doi;
-      const page = await request(articleURL, article.path);
+      const page = await request("https://doi.org/" + doi, article.path);
       const finalURL = new win.URL(page.url);
-      if (
-        finalURL.protocol !== "https:" ||
-        !(
-          finalURL.hostname === "nature.com" ||
-          finalURL.hostname.endsWith(".nature.com")
-        )
-      )
+      if (finalURL.protocol !== "https:" || !isNatureHost(finalURL.hostname))
         throw new Error("DOI did not resolve to a Nature article");
       const document = new win.DOMParser().parseFromString(
         await Zotero.File.getContentsAsync(article.path),
@@ -212,15 +175,13 @@ export async function downloadNaturePDF(
       if (!link) throw new Error("Nature article has no main PDF link");
       const pdfURL = new win.URL(link, finalURL);
       const allowedHost =
-        pdfURL.hostname === "nature.com" ||
-        pdfURL.hostname.endsWith(".nature.com") ||
+        isNatureHost(pdfURL.hostname) ||
         pdfURL.hostname === "media.springernature.com";
       if (pdfURL.protocol !== "https:" || !allowedHost)
         throw new Error("Nature PDF link has an unsupported publisher URL");
       const pdf = await request(pdfURL.href, temporary.path);
       await validatePDF(temporary.path);
-      if (expired || Date.now() >= deadline)
-        throw new Error("Nature fallback timed out after 20 seconds");
+      task.check();
       succeeded = true;
       return {
         ...temporary,
@@ -229,25 +190,14 @@ export async function downloadNaturePDF(
         timings: {
           articleMs: page.ms,
           pdfMs: pdf.ms,
-          totalMs: Date.now() - started,
+          totalMs: Date.now() - task.started,
         },
       };
     } finally {
       // A killed process releases files before cleanup; late results never import.
-      if (process)
-        await process.kill(0).catch((error) => Zotero.logError(error));
+      if (process) await process.kill(0).catch(Zotero.logError);
       if (!succeeded) temporary.cleanup();
     }
   })();
-  void operation.then(
-    (candidate) => {
-      if (expired) candidate.cleanup();
-    },
-    () => undefined,
-  );
-  try {
-    return await Promise.race([operation, timeout]);
-  } finally {
-    win.clearTimeout(timer);
-  }
+  return task.run(operation);
 }

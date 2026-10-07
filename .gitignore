@@ -14,6 +14,7 @@ tsconfig.tsbuildinfo
 .scaffold
 build
 logs
+test/
 
 .vscode
 __pycache__

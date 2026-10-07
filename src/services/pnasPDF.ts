@@ -5,31 +5,12 @@ import {
   PDFCandidate,
   validatePDF,
 } from "./pdf";
+import { DownloadTask } from "./downloadTask";
+import { DownloadProcess, DownloadSubprocess, readOutput } from "./subprocess";
 
-export const PNAS_TIMEOUT_MS = 20_000;
+// Only one task may own the plugin's shared Chrome profile at a time.
 let queue: Promise<unknown> = Promise.resolve();
 const cancellations = new Set<() => void>();
-type ChromeClasses = Record<
-  string,
-  { createInstance: (iid: unknown) => unknown }
->;
-
-interface ChromeProcess {
-  stdout: { readString: () => Promise<string> };
-  wait: () => Promise<{ exitCode: number }>;
-  kill: (timeout: number) => Promise<unknown>;
-}
-
-interface ChromeSubprocess {
-  pathSearch: (name: string) => Promise<string>;
-  call: (options: {
-    command: string;
-    arguments: string[];
-    stderr: string;
-    environmentAppend: boolean;
-    environment: Record<string, string>;
-  }) => Promise<ChromeProcess>;
-}
 
 /**
  * Identify PNAS main-journal DOIs; PNAS Nexus uses another platform.
@@ -43,6 +24,16 @@ export function canFetchPNASPDF(item: Zotero.Item): boolean {
   return /^10\.1073\/pnas\./.test(normalizeDOI(item.getField("DOI")) || "");
 }
 
+/** Cancel plugin-owned downloads on shutdown, preserving the Chrome profile. */
+export function stopPNASDownloads(): void {
+  for (const cancel of cancellations) cancel();
+}
+
+type ChromeClasses = Record<
+  string,
+  { createInstance: (iid: unknown) => unknown }
+>;
+
 /**
  * Locate installed Chrome without a shell or using the user's profile.
  *
@@ -51,7 +42,7 @@ export function canFetchPNASPDF(item: Zotero.Item): boolean {
  * Returns:
  *   The executable's absolute path, or a CHROME_NOT_FOUND error.
  */
-async function findChrome(subprocess: ChromeSubprocess): Promise<string> {
+async function findChrome(subprocess: DownloadSubprocess): Promise<string> {
   const win = Zotero.getMainWindow();
   if (Zotero.isWin) {
     // App Paths covers user-selected installation locations as well as defaults.
@@ -108,354 +99,294 @@ async function findChrome(subprocess: ChromeSubprocess): Promise<string> {
 }
 
 /**
- * Stop downloads owned by this plugin when Zotero or the addon shuts down.
- *
- * Returns:
- *   Nothing; dedicated profiles are retained, while active tasks are canceled.
- */
-export function stopPNASDownloads(): void {
-  for (const cancel of cancellations) cancel();
-}
-
-/**
- * Download a DOI-matched PDF with installed Chrome and a dedicated profile.
+ * Stage a DOI-matched PNAS PDF through a dedicated Chrome process.
  *
  * Args:
- *   item: Existing parent; its DOI is checked before and after download.
+ *   item: Existing parent whose DOI must match publisher metadata.
  * Returns:
- *   A validated staged PDF. Shared profile work, including queueing and startup,
- *   has a 20-second budget; only task-owned processes and files are cleaned up.
+ *   A validated temporary PDF; its caller owns cleanup. Queueing, startup,
+ *   and download share one 20-second budget.
  */
 export async function downloadPNASPDF(
   item: Zotero.Item,
 ): Promise<PDFCandidate> {
   const doi = normalizeDOI(item.getField("DOI"));
-  if (!doi || !canFetchPNASPDF(item))
+  if (!doi || !/^10\.1073\/pnas\./.test(doi))
     throw new IdentifierError("INVALID_DOI", "Unsupported PNAS DOI");
   const win = Zotero.getMainWindow();
-  const started = Date.now();
-  let ended = false;
-  let child: ChromeProcess | undefined;
+  let child: DownloadProcess | undefined;
+  let exit: Promise<unknown> | undefined;
   let childExited = false;
   let closing = false;
   let socket: WebSocket | undefined;
   let nextID = 0;
   let challenge = false;
+  const pdfURL = "https://www.pnas.org/doi/pdf/" + doi;
+  const pdfDownloadURL = pdfURL + "?download=true";
   let download: { guid: string; state?: string } | undefined;
   const pending = new Map<
     number,
-    { resolve: (value: any) => void; reject: (error: Error) => void }
+    {
+      resolve: (value: any) => void;
+      reject: (error: Error) => void;
+    }
   >();
-  let rejectCancellation: (error: Error) => void;
-  const cancellation = new Promise<never>((_, reject) => {
-    rejectCancellation = reject;
-  });
-
-  /**
-   * Cancel this task and terminate only its child Chrome process.
-   *
-   * Args:
-   *   error: Reason exposed to the full-text coordinator.
-   */
-  function cancel(error: Error) {
-    ended = true;
-    rejectCancellation(error);
-    for (const request of pending.values()) request.reject(error);
-    pending.clear();
-    socket?.close();
-    if (child && !childExited) void child.kill(0).catch(Zotero.logError);
-  }
-  const shutdown = () => cancel(new Error("PNAS download stopped"));
-  cancellations.add(shutdown);
-  const timer = win.setTimeout(
+  const task = new DownloadTask(
+    (error) => {
+      for (const request of pending.values()) request.reject(error);
+      pending.clear();
+      if (socket && socket.readyState < 2) socket.close();
+      if (child && !childExited) void child.kill(0).catch(Zotero.logError);
+    },
     () =>
-      cancel(
-        new IdentifierError(
-          challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
-          "PNAS fallback timed out after 20 seconds" +
-            (challenge
-              ? "; publisher browser verification did not complete"
-              : ""),
-        ),
+      new IdentifierError(
+        challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
+        "PNAS fallback timed out after 20 seconds" +
+          (challenge
+            ? "; publisher browser verification did not complete"
+            : ""),
       ),
-    PNAS_TIMEOUT_MS,
   );
+  const shutdown = () => task.cancel(new Error("PNAS download stopped"));
+  cancellations.add(shutdown);
 
   /**
-   * Check the whole-task budget before issuing another request or filesystem write.
-   */
-  function check() {
-    if (ended || Date.now() - started >= PNAS_TIMEOUT_MS)
-      throw new Error("PNAS fallback timed out after 20 seconds");
-  }
-
-  /**
-   * Issue a CDP request on this loopback-only browser connection.
+   * Send a CDP request, retaining its response until resolved or canceled.
    *
    * Args:
    *   method: Protocol method.
-   *   params: Request parameters.
+   *   params: Protocol request parameters.
    *   sessionId: Optional owned page session.
    * Returns:
-   *   The protocol response; connection errors reject all outstanding requests.
+   *   The protocol response.
    */
-  function command(
+  async function command(
     method: string,
     params: object = {},
     sessionId?: string,
   ): Promise<any> {
-    check();
+    task.check();
     const id = ++nextID;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
+      // The executor rejects send errors; closing the connection clears pending requests.
       socket!.send(JSON.stringify({ id, method, params, sessionId }));
     });
   }
 
-  const previous = queue;
-  const operation = previous
-    .catch(() => undefined)
-    .then(async (): Promise<PDFCandidate> => {
-      check();
-      const temporary = createPDFTemp("pnas");
-      const directory = Zotero.File.pathToFile(temporary.path).parent!;
-      let succeeded = false;
-      try {
-        const profile = getPluginDataDirectory("chrome_profile");
-        const { Subprocess } = win.ChromeUtils.importESModule(
-          "resource://gre/modules/Subprocess.sys.mjs",
-        ) as unknown as { Subprocess: ChromeSubprocess };
-        const executable = await findChrome(Subprocess);
-        check();
-        // Reserve a loopback port, then pass a NONZERO port to Chrome. Port 0 changes
-        // Chrome's navigator.webdriver flag. No flags or scripts override that flag.
-        const reservation = (
-          win.Components.classes as unknown as ChromeClasses
-        )["@mozilla.org/network/server-socket;1"].createInstance(
-          win.Ci.nsIServerSocket,
-        ) as nsIServerSocket;
-        reservation.init(-1, true, 1);
-        const port = reservation.port;
-        reservation.close();
-        child = await Subprocess.call({
-          command: executable,
-          arguments: [
-            "--remote-debugging-address=127.0.0.1",
-            "--remote-debugging-port=" + port,
-            // System-principal Gecko windows may send the opaque origin "null".
-            "--remote-allow-origins=" +
-              [...new Set([win.location.origin, "null"])].join(","),
-            "--user-data-dir=" + profile.path,
-            "--no-first-run",
-            "--no-default-browser-check",
-            "about:blank",
-          ],
-          stderr: "stdout",
-          environmentAppend: true,
-          environment: { TEMP: directory.path, TMP: directory.path },
-        });
-        // Drain output without logging browser data; observe exits and late startup.
-        const launched = child;
-        void (async () => {
-          while (await launched.stdout.readString()) {
-            /* Drain Chrome output. */
-          }
-        })().catch(Zotero.logError);
-        void launched.wait().then(() => {
+  const operation = queue.then(async (): Promise<PDFCandidate> => {
+    task.check();
+    const temporary = createPDFTemp("pnas");
+    const directory = Zotero.File.pathToFile(temporary.path).parent!;
+    let succeeded = false;
+    try {
+      const { Subprocess } = win.ChromeUtils.importESModule(
+        "resource://gre/modules/Subprocess.sys.mjs",
+      ) as unknown as { Subprocess: DownloadSubprocess };
+      const executable = await findChrome(Subprocess);
+      task.check();
+      // Reserve a nonzero loopback port, preserving the existing browser flags.
+      const reservation = (win.Components.classes as unknown as ChromeClasses)[
+        "@mozilla.org/network/server-socket;1"
+      ].createInstance(win.Ci.nsIServerSocket) as nsIServerSocket;
+      reservation.init(-1, true, 1);
+      const port = reservation.port;
+      reservation.close();
+      child = await Subprocess.call({
+        command: executable,
+        arguments: [
+          "--remote-debugging-address=127.0.0.1",
+          "--remote-debugging-port=" + port,
+          // System-principal Gecko windows may send the opaque origin "null".
+          "--remote-allow-origins=" +
+            [...new Set([win.location.origin, "null"])].join(","),
+          "--user-data-dir=" + getPluginDataDirectory("chrome_profile").path,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "about:blank",
+        ],
+        stderr: "stdout",
+        environmentAppend: true,
+        environment: { TEMP: directory.path, TMP: directory.path },
+      });
+      void readOutput(child.stdout, false).catch(Zotero.logError);
+      exit = child.wait().then(
+        () => {
           childExited = true;
-        });
-        if (ended) await launched.kill(0);
-        let version: { webSocketDebuggerUrl: string } | undefined;
-        while (!version) {
-          check();
-          if (childExited)
-            throw new IdentifierError(
-              "CHROME_PROFILE_BUSY",
-              "Dedicated Chrome exited before connecting; its profile may already be in use",
-            );
-          try {
-            const response = await Zotero.HTTP.request(
-              "GET",
-              "http://127.0.0.1:" + port + "/json/version",
-              {
-                timeout: Math.min(
-                  1000,
-                  PNAS_TIMEOUT_MS - (Date.now() - started),
-                ),
-              },
-            );
-            version = JSON.parse(response.responseText);
-          } catch {
-            await new Promise((resolve) => win.setTimeout(resolve, 100));
-          }
-        }
-        check();
-        const address = new win.URL(version.webSocketDebuggerUrl);
-        if (
-          address.protocol !== "ws:" ||
-          address.hostname !== "127.0.0.1" ||
-          address.port !== String(port)
-        )
-          throw new Error("Chrome returned an unexpected debugger address");
-        socket = new win.WebSocket(address.href);
-        socket!.onmessage = (event) => {
-          const message = JSON.parse(String(event.data));
-          if (message.id) {
-            const request = pending.get(message.id);
-            pending.delete(message.id);
-            if (message.error)
-              request?.reject(new Error(message.error.message));
-            else request?.resolve(message.result);
-          }
-          if (
-            message.method === "Browser.downloadWillBegin" &&
-            message.params.url ===
-              "https://www.pnas.org/doi/pdf/" + doi + "?download=true"
-          )
-            download = message.params;
-          if (
-            message.method === "Browser.downloadProgress" &&
-            message.params.guid === download?.guid
-          )
-            download = { ...download!, state: message.params.state };
-        };
-        socket!.onclose = () => {
-          for (const request of pending.values())
-            request.reject(new Error("Dedicated Chrome disconnected"));
-          pending.clear();
-          if (!closing && !ended)
-            cancel(new Error("Dedicated Chrome disconnected"));
-        };
-        await new Promise<void>((resolve, reject) => {
-          socket!.onopen = () => resolve();
-          socket!.onerror = () =>
-            reject(new Error("Cannot connect to dedicated Chrome"));
-        });
-        await command("Browser.setDownloadBehavior", {
-          behavior: "allowAndName",
-          downloadPath: directory.path,
-          eventsEnabled: true,
-        });
-        const { targetId } = await command("Target.createTarget", {
-          url: "about:blank",
-        });
-        const { sessionId } = await command("Target.attachToTarget", {
-          targetId,
-          flatten: true,
-        });
-        const articleStarted = Date.now();
-        await command(
-          "Page.navigate",
-          { url: "https://www.pnas.org/doi/" + doi },
-          sessionId,
-        );
-        let metadata:
-          | { doi?: string; pdf?: string; title?: string; url?: string }
-          | undefined;
-        while (!metadata) {
-          const response = await command(
-            "Runtime.evaluate",
-            {
-              expression:
-                "({doi:document.querySelector('meta[name=citation_doi]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})",
-              returnByValue: true,
-            },
-            sessionId,
+        },
+        (error) => task.cancel(error),
+      );
+      // Startup can finish after the timer; terminate that late child as well.
+      if (task.error) await child.kill(0);
+      let version: { webSocketDebuggerUrl: string } | undefined;
+      while (!version) {
+        const remaining = task.check();
+        if (childExited)
+          throw new IdentifierError(
+            "CHROME_PROFILE_BUSY",
+            "Dedicated Chrome exited before connecting; its profile may already be in use",
           );
-          const page = response.result?.value;
-          challenge = /just a moment|请稍候|security verification/i.test(
-            page?.title || "",
+        try {
+          const response = await Zotero.HTTP.request(
+            "GET",
+            "http://127.0.0.1:" + port + "/json/version",
+            { timeout: Math.min(1000, remaining) },
           );
-          if (page?.doi) {
-            if (normalizeDOI(page.doi) !== doi)
-              throw new IdentifierError(
-                "DOI_MISMATCH",
-                "PNAS page DOI does not match the parent item",
-              );
-            const url = new win.URL(page.url);
-            if (url.protocol !== "https:" || url.hostname !== "www.pnas.org")
-              throw new Error(
-                "PNAS article redirected to an unexpected publisher",
-              );
-            metadata = page;
-          } else await new Promise((resolve) => win.setTimeout(resolve, 250));
-        }
-        const articleMs = Date.now() - articleStarted;
-        const pdfURL = "https://www.pnas.org/doi/pdf/" + doi;
-        if (metadata.pdf !== pdfURL)
-          throw new Error("PNAS article has an unexpected PDF URL");
-        const pdfStarted = Date.now();
-        await command(
-          "Page.navigate",
-          { url: pdfURL + "?download=true" },
-          sessionId,
-        );
-        while (download?.state !== "completed") {
-          check();
-          if (childExited)
-            throw new Error("Dedicated Chrome exited during PDF download");
-          if (download?.state === "canceled")
-            throw new Error("Chrome canceled the PNAS PDF download");
-          if (!download) {
-            const response = await command(
-              "Runtime.evaluate",
-              { expression: "document.title", returnByValue: true },
-              sessionId,
-            );
-            challenge = /just a moment|请稍候|security verification/i.test(
-              response.result?.value || "",
-            );
-          }
+          version = JSON.parse(response.responseText);
+        } catch {
           await new Promise((resolve) => win.setTimeout(resolve, 100));
         }
-        // The task directory, URL and browser event identify this download uniquely.
-        if (!/^[a-f0-9-]{36}$/i.test(download.guid))
-          throw new Error("Chrome returned an invalid download identifier");
-        const file = directory.clone();
-        file.append(download.guid);
-        await validatePDF(file.path);
-        check();
-        file.moveTo(directory, "article.pdf");
-        succeeded = true;
-        return {
-          path: temporary.path,
-          cleanup: temporary.cleanup,
-          source: "pnas",
-          url: pdfURL,
-          timings: {
-            articleMs,
-            pdfMs: Date.now() - pdfStarted,
-            totalMs: Date.now() - started,
-          },
+      }
+      task.check();
+      const address = new win.URL(version.webSocketDebuggerUrl);
+      if (
+        address.protocol !== "ws:" ||
+        address.hostname !== "127.0.0.1" ||
+        address.port !== String(port)
+      )
+        throw new Error("Chrome returned an unexpected debugger address");
+      const connection: WebSocket = (socket = new win.WebSocket(address.href));
+      connection.onmessage = (event) => {
+        const message = JSON.parse(String(event.data));
+        if (message.id) {
+          const request = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) request?.reject(new Error(message.error.message));
+          else request?.resolve(message.result);
+        }
+        if (
+          message.method === "Browser.downloadWillBegin" &&
+          message.params.url === pdfDownloadURL
+        )
+          download = message.params;
+        if (
+          message.method === "Browser.downloadProgress" &&
+          message.params.guid === download?.guid
+        )
+          download = { ...download!, state: message.params.state };
+      };
+      await new Promise<void>((resolve, reject) => {
+        connection.onopen = () => resolve();
+        connection.onerror = () =>
+          reject(new Error("Cannot connect to dedicated Chrome"));
+        connection.onclose = () => {
+          const error = new Error("Dedicated Chrome disconnected");
+          // Reject startup too: a canceled connection must release the profile queue.
+          reject(error);
+          for (const request of pending.values()) request.reject(error);
+          pending.clear();
+          if (!closing) task.cancel(error);
         };
-      } finally {
+      });
+      await command("Browser.setDownloadBehavior", {
+        behavior: "allowAndName",
+        downloadPath: directory.path,
+        eventsEnabled: true,
+      });
+      const { targetId } = await command("Target.createTarget", {
+        url: "about:blank",
+      });
+      const { sessionId } = await command("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      });
+      const articleStarted = Date.now();
+      await command(
+        "Page.navigate",
+        { url: "https://www.pnas.org/doi/" + doi },
+        sessionId,
+      );
+      let page: Record<string, string | undefined> | undefined;
+      while (!page?.doi) {
+        const response = await command(
+          "Runtime.evaluate",
+          {
+            expression:
+              "({doi:document.querySelector('meta[name=citation_doi]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})",
+            returnByValue: true,
+          },
+          sessionId,
+        );
+        page = response.result?.value;
+        challenge = /just a moment|请稍候|security verification/i.test(
+          page?.title || "",
+        );
+        if (!page?.doi)
+          await new Promise((resolve) => win.setTimeout(resolve, 250));
+      }
+      if (normalizeDOI(page.doi) !== doi)
+        throw new IdentifierError(
+          "DOI_MISMATCH",
+          "PNAS page DOI does not match the parent item",
+        );
+      const url = new win.URL(page.url);
+      if (url.protocol !== "https:" || url.hostname !== "www.pnas.org")
+        throw new Error("PNAS article redirected to an unexpected publisher");
+      const articleMs = Date.now() - articleStarted;
+      if (page.pdf !== pdfURL)
+        throw new Error("PNAS article has an unexpected PDF URL");
+      const pdfStarted = Date.now();
+      await command("Page.navigate", { url: pdfDownloadURL }, sessionId);
+      while (download?.state !== "completed") {
+        task.check();
+        if (childExited)
+          throw new Error("Dedicated Chrome exited during PDF download");
+        if (download?.state === "canceled")
+          throw new Error("Chrome canceled the PNAS PDF download");
+        if (!download) {
+          const response = await command(
+            "Runtime.evaluate",
+            { expression: "document.title", returnByValue: true },
+            sessionId,
+          );
+          challenge = /just a moment|请稍候|security verification/i.test(
+            response.result?.value || "",
+          );
+        }
+        await new Promise((resolve) => win.setTimeout(resolve, 100));
+      }
+      // The task directory, URL and browser event identify this download uniquely.
+      if (!/^[a-f0-9-]{36}$/i.test(download.guid))
+        throw new Error("Chrome returned an invalid download identifier");
+      const file = directory.clone();
+      file.append(download.guid);
+      await validatePDF(file.path);
+      task.check();
+      file.moveTo(directory, "article.pdf");
+      succeeded = true;
+      return {
+        ...temporary,
+        source: "pnas",
+        url: pdfURL,
+        timings: {
+          articleMs,
+          pdfMs: Date.now() - pdfStarted,
+          totalMs: Date.now() - task.started,
+        },
+      };
+    } finally {
+      try {
+        closing = true;
         if (child && !childExited) {
-          closing = true;
-          // Give the owned browser a short graceful exit so its profile is flushed.
-          if (!ended && socket?.readyState === 1)
+          // Allow a short profile flush before terminating the owned child.
+          if (!task.error && socket?.readyState === 1)
             void command("Browser.close").catch(() => undefined);
           await Promise.race([
-            child.wait(),
+            exit,
             new Promise((resolve) => win.setTimeout(resolve, 1000)),
           ]);
           if (!childExited) await child.kill(0).catch(Zotero.logError);
         }
         socket?.close();
-        if (!succeeded || ended) temporary.cleanup();
+      } finally {
+        if (!succeeded || task.error) temporary.cleanup();
       }
-    });
+    }
+  });
   queue = operation.catch(() => undefined);
-  void operation.then(
-    (candidate) => {
-      if (ended) candidate.cleanup();
-    },
-    () => undefined,
-  );
   try {
-    return await Promise.race([operation, cancellation]);
+    return await task.run(operation);
   } finally {
-    win.clearTimeout(timer);
     cancellations.delete(shutdown);
-    ended = true;
   }
 }

@@ -1,10 +1,12 @@
 import { normalizeDOI } from "./identifier";
-import { createPDFTemp, getPDFAttachment, importPDF, validatePDF } from "./pdf";
 import {
-  canFetchNaturePDF,
-  downloadNaturePDF,
+  createPDFTemp,
+  getPDFAttachment,
+  importPDF,
+  validatePDF,
   PDFCandidate,
-} from "./naturePDF";
+} from "./pdf";
+import { canFetchNaturePDF, downloadNaturePDF } from "./naturePDF";
 import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
 
 export const NATIVE_WAIT_MS = 15_000;
@@ -13,12 +15,12 @@ export interface FullTextResult {
   status: FullTextStatus;
   attachmentID?: number;
   attachmentKey?: string;
-  source?: "existing" | "native" | "nature" | "pnas";
+  source?: "existing" | PDFCandidate["source"];
   code?: string;
   timings?: PDFCandidate["timings"];
   message?: string;
   attempts?: {
-    source: "native" | "nature" | "pnas";
+    source: PDFCandidate["source"];
     status: string;
     message?: string;
     code?: string;
@@ -144,11 +146,11 @@ async function resolveFullText(
       } else {
         attempts.push({
           source: "native",
-          status: initial
-            ? initial.message
-              ? "failed"
-              : "not_found"
-            : "timeout",
+          status: initial?.message
+            ? "failed"
+            : initial
+              ? "not_found"
+              : "timeout",
           message: initial?.message,
         });
         fallback = (
