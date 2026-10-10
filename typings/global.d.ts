@@ -27,7 +27,6 @@ declare namespace Zotero {
         run(request: any): Promise<[number, string, string]>;
       }
       let Plus: new () => Schema;
-      let AddItemEndpoint: new () => Schema;
       let GetSelectedCollectionEndpoint: new () => Schema;
       let AddDOIEndpoint: new () => Schema;
       let FindFullTextEndpoint: new () => Schema;

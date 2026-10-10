@@ -90,7 +90,6 @@ Zotero-API-Key: <授权获得的 key>
 | POST | `/api/plus/import-pdf`          | 向已有条目导入本地 PDF          |
 | GET  | `/api/plus`                     | 检查插件是否运行                |
 | GET  | `/api/plus/selected-collection` | 获取当前选中的收藏夹            |
-| POST | `/api/plus/add-item-by-id`      | 使用 DOI、ISBN、PMID 等添加条目 |
 
 ### 接口授权
 
@@ -190,27 +189,6 @@ Nature 和 PNAS 主刊也会尝试出版社备用下载；`methods` 仅控制常
 - **当前收藏夹**：GET `/api/plus/selected-collection`，
   返回 `{"name": "我的集合", "key": "ABC12345"}`；
   未选中时返回 `No Collection selected.`。
-- **identifier导入**：POST `/api/plus/add-item-by-id`，支持 DOI、ISBN、PMID 等。pdf有时会获取失败，所以有pdf需求时请使用上面的 `add-doi` 接口。
-
-identifier导入的请求：
-
-```json
-{
-  "identifier": "10.1038/nature12373",
-  "collectionKey": "ABC12345"
-}
-```
-
-`identifier` 必填，`collectionKey` 可选。成功响应示例：
-
-```json
-{
-  "status": "success",
-  "addedCount": 1,
-  "titles": ["文章标题"]
-}
-```
-
 ---
 
 ## 开发
@@ -235,8 +213,8 @@ XPI 位于 `.scaffold/build/doi2pdf-v<version>.xpi`；版本也可从 `.scaffold
 
 ### 文献创建与 PDF 获取
 
-`add-doi` 复用 Zotero 内部的 Add Item by Identifier 能力，先保存或复用
-元数据，再单独获取 PDF。并发的同一 DOI 导入共享元数据创建任务，同一条目的
+`add-doi` 使用 Zotero 内置标识符翻译器保存或复用元数据，再单独获取 PDF。
+并发的同一 DOI 导入共享元数据创建任务，同一条目的
 全文请求也共享下载任务。已有可访问的 PDF 直接复用；网页快照和丢失的文件不算成功。
 
 常规下载和出版社备用路线都先保存临时文件，再统一校验和导入。
