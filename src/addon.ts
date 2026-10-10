@@ -110,8 +110,8 @@ Zotero.Server.LocalAPI.GetSelectedCollectionEndpoint = class extends (
 
   async run(_: any): Promise<[number, string, string]> {
     try {
-      // 获取当前活动的窗口面板
-      const collection = Zotero.getActiveZoteroPane().getSelectedCollection();
+      // 没有活动窗口时与未选中收藏夹采用相同的响应，兼容可空的 Zotero 面板类型。
+      const collection = Zotero.getActiveZoteroPane()?.getSelectedCollection();
 
       if (collection) {
         ztoolkit.log("当前 Collection 名称:", collection.name);
