@@ -1,183 +1,133 @@
 # doi2pdf
 
-[![zotero target version](https://img.shields.io/badge/Zotero-9%20%7C%2010.0.1-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
-[![License: AGPL-3.0-or-later](https://img.shields.io/github/license/GOKORURI007/zotero-api-plus)](https://github.com/GOKORURI007/zotero-api-plus/blob/main/LICENSE)
+[![zotero target version](https://img.shields.io/badge/Zotero-9%20%7C%2010.0.x-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![License: AGPL-3.0-or-later](https://img.shields.io/github/license/CarhoJohn/doi2pdf)](LICENSE)
 
-一个为 Zotero 本地 API 扩展额外功能的插件。
+**把 DOI 变成 Zotero 中的文献条目和 PDF 附件。** 
 
-## 版本与来源
+doi2pdf 通过 Zotero 本地 API
+接收 DOI，获取文献信息、下载 PDF，并保存到指定收藏夹（Collection），方便与Agent、脚本、文献管理工具等集成。
 
-当前本地开发版本为 `0.1.4`。本项目基于
-[GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
-的 `v0.2.1` 版本继续开发。
+## 目录
 
-插件清单兼容 Zotero 9 及 Zotero 10.0.x（包括 10.0.1）。
+- [主要功能](#主要功能)
+- [安装](#安装)
+- [快速使用](#快速使用)
+- [API 参考](#api-参考)
+- [开发](#开发)
+- [项目来源与许可证](#项目来源与许可证)
+- [原理与实现细节](#原理与实现细节)
 
-## 功能特性
+## 主要功能
 
-- 为 Zotero 本地 API 扩展自定义端点
-- 通过 API 使用标识符（DOI、ISBN、PMID 等）向 Zotero 添加项目
-- 在 Zotero 设置中配置 DOI 项目的目标 Collection；不存在时首次使用会自动创建
-- 健康检查端点，用于验证插件状态
-- 易于与其他工具和脚本集成
+- **自动下载 PDF**：添加 DOI 时默认查找全文，并保存为 Zotero 附件；也可以为已有条目补充 PDF。
+- **补充出版社下载路线**：Zotero 常规获取未成功时，Nature 系列和 PNAS 主刊会尝试官网备用下载，支持 Nature 提前发布文章的 `_reference.pdf` 链接。
+- **减少重复导入**：按 DOI 复用已有条目，已有可访问的 PDF 时直接复用附件。
+- **指定保存位置**：在插件设置中选择默认收藏夹，支持 `父级/子级` 路径；也可在请求中指定收藏夹。
+- **导入本地 PDF**：将本机已有文件复制为附件，保留原文件。
 
-## API 端点
+简单来说，插件先通过 Zotero 获取文献信息，再尝试下载全文；找不到 PDF 时仍保留
+文献条目。下载依赖当前网络的开放获取或机构访问权限。
 
-在实测的 Zotero 10.0.5 中，POST 接口继承 Zotero 本地 API 的写入认证要求。
-先 GET `/api/plus`，读取响应头 `Zotero-Server-ID`；再通过 Zotero 原生
-`POST /api/local/authorize`（JSON：`{"appName":"你的应用名"}`）获取 API key。
-后续 POST 请求携带 `Zotero-Server-ID` 和 `Zotero-API-Key` 请求头。
-选择一次性授权时，key 在一次写入请求中消耗；选择始终允许时可以复用。
-插件遵循当前 Zotero 的认证规则；浏览器 User-Agent 请求还可能被原生服务拒绝。
+PNAS 官网备用下载需要已安装 Google Chrome，运行时可能显示专用浏览器窗口。
 
-### 健康检查
+## 快速使用
 
-```
-GET /api/plus
-```
+### 1. 安装插件
 
-返回一个简单消息，指示 API 正在运行。
+1. 从 [GitHub Releases](https://github.com/CarhoJohn/doi2pdf/releases) 下载 `.xpi` 文件。
+2. 在 Zotero 中打开 `工具 > 插件`，点击齿轮图标，选择 `从文件安装插件...`。
 
-#### 响应
+### 2. 启用本地 API 并设置收藏夹
 
-```
-Zotero Local API Plus is running.
-```
+- 启用 Zotero 本地 API：在 `设置 > 高级` 中打开API，一般是 `http://localhost:23119`
+- 在 Zotero 设置的 doi2pdf 页面填写目标收藏夹，默认是 `doi2pdf`。
+  填写 `父级/子级` 可保存到嵌套收藏夹；不存在的收藏夹会在首次使用时创建。
 
-### 通过标识符添加项目
+### 3. 添加 DOI 并下载 PDF
 
-```
-POST /api/plus/add-item-by-id
+先完成下方的[接口授权](#接口授权)，再用脚本或 API 工具发送请求。
+首次获取写入授权时，Zotero 会弹窗提示，请按提示选择允许方式。
+只需提供 DOI，插件就会尝试下载 PDF：
+
+```http
+POST http://localhost:23119/api/plus/add-doi
 Content-Type: application/json
-```
+Zotero-Server-ID: <健康检查响应头中的值>
+Zotero-API-Key: <授权获得的 key>
 
-使用 DOI、ISBN、PMID 等标识符将项目添加到 Zotero。
-
-#### 请求体
-
-```json
 {
-  "identifier": "10.1038/nature12373", // 必填：DOI、ISBN、PMID 等
-  "collectionKey": "ABC123" // 可选：要添加项目的集合键
+  "doi": "10.1038/s41562-026-02563-9"
 }
 ```
 
-#### 响应
+条目会保存到插件设置的收藏夹；传入 `collectionKey` 可指定其他收藏夹。
+只想获取文献信息时，增加 `"findFullText": false`。
 
-```json
-{
-  "status": "success",
-  "addedCount": 1,
-  "titles": ["文章标题"]
-}
-```
+### 3. 查看下载结果
 
-### 获取当前选中的集合
+响应中的 `itemKey` 是文献条目的标识，`fullText.status` 表示 PDF 结果：
 
-```
-GET /api/plus/selected-collection
-```
+| 值          | 含义                                      |
+| ----------- | ----------------------------------------- |
+| `found`     | PDF 已可用，响应包含附件 ID 和 key        |
+| `not_found` | 未找到 PDF，文献条目已保留                |
+| `failed`    | 下载或导入失败，原因见 `fullText.message` |
+| `skipped`   | 请求关闭了全文查找，且未提供本地 PDF      |
 
-返回 Zotero 中当前选中的集合信息。
+外层 `status: "success"` 表示文献条目处理成功，PDF 是否成功请看 `fullText`。
+需要补充全文或导入本地文件时，见下方 [API 参考](#api-参考)。
 
-#### 响应
+## API 参考
 
-```json
-{
-  "name": "我的集合",
-  "key": "ABC123"
-}
-```
+所有接口均以 `http://localhost:23119` 为基础地址。POST 请求使用 JSON，
+并携带当前 Zotero 要求的认证头。
 
-#### 错误响应
+| 方法 | 路径                            | 用途                            |
+| ---- | ------------------------------- | ------------------------------- |
+| POST | `/api/plus/add-doi`             | 添加 DOI 并获取 PDF             |
+| POST | `/api/plus/find-fulltext`       | 为已有条目查找 PDF              |
+| POST | `/api/plus/import-pdf`          | 向已有条目导入本地 PDF          |
+| GET  | `/api/plus`                     | 检查插件是否运行                |
+| GET  | `/api/plus/selected-collection` | 获取当前选中的收藏夹            |
+| POST | `/api/plus/add-item-by-id`      | 使用 DOI、ISBN、PMID 等添加条目 |
 
-```
-No Collection selected.
-```
+### 接口授权
 
-### 添加 DOI 并查找全文 (新增功能)
+**POST 接口继承 Zotero 本地 API 的写入认证要求。** 在实测的 Zotero 10.0.5 中，
+首次没有授权 key 时，调用方需要先请求 Zotero 的
+`POST /api/local/authorize` 获取写入授权。操作流程如下：
 
-```
-POST /api/plus/add-doi
-Content-Type: application/json
-```
+1. **准备就绪**：启动 Zotero，确认本地 API 已启用且 doi2pdf 插件已安装。
+2. **识别当前 Zotero**：调用方先 GET `/api/plus`，读取响应头中的
+   `Zotero-Server-ID`，用于后续写入请求。
+3. **首次请求授权**：没有可用 key 时，调用方向 `POST /api/local/authorize`
+   提交应用名称（`appName`），Zotero 会弹出写入授权提示。
+4. **在 Zotero 中确认**：核对弹窗中的应用名称，选择“允许”或“始终允许”。“允许”对应一次写入；“始终允许”获得的 key 可以用于后续请求。选择拒绝则不会获得写入授权。
 
-该接口复用 Zotero 内部的 Add Item by Identifier 能力，并按 DOI 复用已有条目。
+### 添加 DOI 并获取 PDF
 
-#### 请求体
+`POST /api/plus/add-doi`
 
 ```json
 {
   "doi": "10.1038/s41562-026-02563-9",
-  "collectionKey": "ABC123",
+  "collectionKey": "doi2pdf",
   "findFullText": true,
   "shortTitle": "Custom short title"
 }
 ```
 
-`doi` 必填；`collectionKey`、`findFullText` 和 `shortTitle` 可选，默认会尝试查找全文。
-仅当 `shortTitle` 显式传入且为非空字符串时，插件才会将其写入并覆盖条目的
-Short Title；未传入或传入空字符串时不会改动该字段。
-未传入 collectionKey 时，项目会保存到插件设置中的目标 Collection；如果该
-Collection 不存在，插件会在首次添加时自动创建。设置值支持使用
-父级/子级表示嵌套 Collection。
+| 字段            | 必填 | 说明                                                            |
+| --------------- | ---- | --------------------------------------------------------------- |
+| `doi`           | 是   | DOI 或可解析的 DOI URL                                          |
+| `collectionKey` | 否   | 目标收藏夹的 key；省略时使用插件设置                            |
+| `findFullText`  | 否   | 是否查找全文，默认 `true`                                       |
+| `shortTitle`    | 否   | 非空字符串会覆盖 Short Title；省略或空字符串不改动              |
+| `methods`       | 否   | Zotero 常规全文解析方法的字符串数组；省略或空数组时使用默认顺序 |
+| `pdfPath`       | 否   | 本机可读的 PDF 绝对路径；提供时文件会复制到 Zotero 附件存储，跳过网络查找，原文件保留。文件校验失败时返回错误。手动提供文件时，请确保 PDF 内容对应所填 DOI。 |
 
-`add-doi` 先保存或复用元数据，再单独获取 PDF。对于 Nature 文献，常规
-获取提前失败时立即启动官网备用下载；常规获取开始后 8 秒仍未成功时也会
-启动备用下载。备用流程由插件直接调用系统 curl：Windows 使用系统目录中的
-`curl.exe`，其他系统在 PATH 中查找 `curl`。不经过 shell，不需要外部脚本。
-同一次下载使用独立的临时 Cookie 文件访问文章页和正文 PDF，
-优先使用官网正文 PDF 下载按钮，兼容提前发布文章的 `_reference.pdf`；
-没有正文下载按钮时才使用 `citation_pdf_url` 元数据。
-整个备用流程的超时为 20 秒。8 秒从父条目确定后开始计时，不包含元数据查询
-时间，也不表示整个 API 请求必须在 8 秒内返回。
-
-PNAS 主刊（`10.1073/pnas.*`）沿用相同的触发条件，并改用已安装的 Google
-Chrome 获取官网文章和正文 PDF。插件通过本地 CDP 连接操作独立浏览器，不需要
-Node、Playwright 或额外下载浏览器。它使用非零调试端口，不启用 headless，
-不修改网页中的浏览器标记；可能会显示专用 Chrome 窗口。
-先核对官网元数据中的 DOI，再访问 `citation_pdf_url` 对应的 `/doi/pdf/` 地址，
-通过 Chrome 原生下载事件确认文件完成，并校验 PDF 文件头。
-整个 PNAS 备用任务的 20 秒预算包含等待其他 PNAS 任务、Chrome 启动及下载。
-不同条目共用一个专用 profile，任务串行运行；同一条目继续共享全文任务。
-PNAS Nexus 使用不同平台，本版本未加入其出版社专用兜底。
-
-运行数据目录在插件运行时从 `Zotero.DataDirectory.dir` 读取，即 Zotero 设置中的
-数据目录；构建和 XPI 中不包含开发机器的数据路径。目录结构为：
-
-```text
-<Zotero 数据目录>/doi2pdf/
-  chrome_profile/       Chrome 配置、Cookie 和缓存，跨任务与插件升级保留
-  downloads/            各下载任务的独立暂存目录，完成或失败后清理
-```
-
-原生下载、Nature curl 和 PNAS Chrome 的暂存文件均使用该目录。
-每次任务只清理自己的下载目录；不会删除 Chrome profile、文献数据库或已有附件。
-修改 Zotero 数据目录并重启后，新任务会使用新的路径，旧目录不自动迁移或删除。
-插件的设置项继续由 Zotero 的偏好设置系统管理；Chrome 自身的配置位于上述 profile。
-
-两条下载路线先保存临时文件，再统一导入附件；即使常规路线晚到，也只保存一份
-PDF。并发的同一 DOI 导入会共享元数据创建任务，同一条目的全文请求也会共享
-下载任务。已有可访问的 PDF 会直接复用，网页快照和丢失的文件不算成功。
-官网访问仍需要当前网络具备相应的开放获取或机构访问权限。
-
-也可以提供 Zotero 所在电脑上已有的 PDF，直接跳过网络全文查找：
-
-```json
-{
-  "doi": "10.1038/s42256-026-01281-1",
-  "collectionKey": "ABC12345",
-  "pdfPath": "E:/Downloads/s42256-026-01281-1.pdf",
-  "findFullText": false
-}
-```
-
-`pdfPath` 必须是本机可读的绝对路径，文件会复制到 Zotero 附件存储，原文件
-不会删除。显式提供 `pdfPath` 时，无论 `findFullText` 的值是什么，均优先导入
-该文件；文件校验失败时返回错误。有效 PDF 文件头只能证明文件类型，手动提供
-文件时仍需确保内容对应所填 DOI。
-
-#### 响应
+响应示例（省略条目摘要等字段）：
 
 ```json
 {
@@ -187,54 +137,18 @@ PDF。并发的同一 DOI 导入会共享元数据创建任务，同一条目的
   "created": true,
   "fullText": {
     "status": "found",
+    "source": "nature",
     "attachmentID": 456,
     "attachmentKey": "XYZ12345"
   }
 }
 ```
 
-全文不可用时，`fullText.status` 为 `not_found`，元数据条目仍会保留。
+`created` 表示是否新建文献条目；完整下载状态见[查看下载结果](#3-查看下载结果)。
 
-下载异常或备用流程超时时为 `failed`，原因位于 `fullText.message`。外层
-`status: "success"` 只表示元数据处理成功。成功结果的 `fullText.source` 会标明
-`existing`、`native`、`nature`、`pnas` 或 `local`；自动获取结果还包含 `attempts` 诊断。
-Nature 或 PNAS 下载成功时，`fullText.timings` 包含 `articleMs`、`pdfMs` 和 `totalMs`，
-均以毫秒表示；总时间包括进程启动、网页解析和文件校验，不包含附件入库。
-系统缺少 curl、curl 返回错误或下载超时时，保留元数据条目并报告失败原因。
-PNAS 未安装 Chrome 时返回 `fullText.code: "CHROME_NOT_FOUND"`；检测到验证页且
-20 秒内未完成时返回 `NEEDS_BROWSER_ACCESS`，其他超时为 `PNAS_TIMEOUT`。
-profile 被占用或启动失败也会保留元数据并报告原因；浏览器方式不保证绕过网站验证。
-临时下载使用上述 `downloads` 下的独立 `doi2pdf-*` 目录，导入后或失败后清理；仍在
-运行的晚到下载在结束后清理，绝不会再次导入附件。超时会终止本次任务启动的
-curl 或 Chrome 子进程；任务 Cookie 文件清理，Chrome profile 中的会话保留。
+### 为已有条目查找 PDF (待优化)
 
-### 向已有条目导入 PDF
-
-```
-POST /api/plus/import-pdf
-Content-Type: application/json
-```
-
-```json
-{
-  "itemKey": "ABC12345",
-  "expectedDOI": "10.1038/s42256-026-01281-1",
-  "pdfPath": "E:/Downloads/s42256-026-01281-1.pdf"
-}
-```
-
-三个字段均必填。接口只在用户库中查找指定父条目，绝不会创建新的文献条目。
-条目不存在或已删除时返回 `ITEM_NOT_FOUND`；父条目 DOI 不匹配时返回
-`DOI_MISMATCH`；路径或文件无效时返回 `INVALID_PDF`。已有可访问的 PDF 时
-返回已有附件，不覆盖它。导入成功返回 `itemID`、`itemKey` 和包含附件 ID/key
-的 `fullText`。本接口不改动父条目的元数据或收藏夹。
-
-### 为已有条目查找全文 (新增功能)
-
-```
-POST /api/plus/find-fulltext
-Content-Type: application/json
-```
+`POST /api/plus/find-fulltext`
 
 ```json
 {
@@ -243,93 +157,168 @@ Content-Type: application/json
 }
 ```
 
-`methods` 可选；省略时使用 Zotero 默认的全文解析顺序。
+`itemKey` 必填，指向用户库中的文献条目；`methods` 可选，省略或空数组时使用
+Zotero 默认全文解析顺序。响应包含 `item` 和 `fullText`。
+Nature 和 PNAS 主刊也会尝试出版社备用下载；`methods` 仅控制常规解析器。
 
-Nature 和 PNAS 主刊文献也会使用上述 8 秒触发、20 秒超时的官网备用路线。
-`methods` 仅控制常规 Zotero 解析器，不会禁用出版社备用路线。
+### 向已有条目导入本地 PDF
 
-## 安装
+`POST /api/plus/import-pdf`
 
-1. 本地开发时，使用 `npm run build` 生成的
-   `.scaffold/build/doi2pdf-v<version>.xpi`；发布包可从
-   [GitHub Releases](https://github.com/CarhoJohn/doi2pdf/releases) 下载。
-2. 在 Zotero 中，转到 `工具 > 插件`。
-3. 点击齿轮图标，选择 `从文件安装插件...`。
-4. 选择下载的 `.xpi` 文件。
-5. 重启 Zotero。
+```json
+{
+  "itemKey": "ABC12345",
+  "expectedDOI": "10.1038/s41562-026-02563-9",
+  "pdfPath": "E:/Downloads/s41562-026-02563-9_reference.pdf"
+}
+```
 
-## 使用
+三个字段均必填。接口只查找用户库中的指定条目，不创建新条目，也不改动父条目的
+元数据或收藏夹。已有可访问的 PDF 时返回已有附件。
 
-1. 确保 Zotero 的本地 API 已启用（转到 `编辑 > 首选项 > 高级 > 文件和文件夹 > 显示数据目录`，然后编辑 `prefs.js` 并添加 `user_pref("extensions.zotero.httpServer.enabled", true);`）。
-2. 在 Zotero 设置中的 doi2pdf 页面设置目标 Collection，默认值为 doi2pdf。
-3. 按照上述描述使用 API 端点。请求中显式提供 collectionKey 时，会覆盖插件设置。
+| 错误码           | 含义                                 |
+| ---------------- | ------------------------------------ |
+| `ITEM_NOT_FOUND` | 条目不存在、已删除或不是文献条目     |
+| `DOI_MISMATCH`   | 父条目的 DOI 与 `expectedDOI` 不匹配 |
+| `INVALID_PDF`    | 路径或 PDF 文件无效                  |
+
+成功响应包含 `itemID`、`itemKey`，以及带附件 ID/key 的 `fullText`。
+
+### 其他接口
+
+- **健康检查**：GET `/api/plus`，返回 `Zotero Local API Plus is running.`。
+- **当前收藏夹**：GET `/api/plus/selected-collection`，
+  返回 `{"name": "我的集合", "key": "ABC12345"}`；
+  未选中时返回 `No Collection selected.`。
+- **identifier导入**：POST `/api/plus/add-item-by-id`，支持 DOI、ISBN、PMID 等。pdf有时会获取失败，所以有pdf需求时请使用上面的 `add-doi` 接口。
+
+identifier导入的请求：
+
+```json
+{
+  "identifier": "10.1038/nature12373",
+  "collectionKey": "ABC12345"
+}
+```
+
+`identifier` 必填，`collectionKey` 可选。成功响应示例：
+
+```json
+{
+  "status": "success",
+  "addedCount": 1,
+  "titles": ["文章标题"]
+}
+```
+
+---
 
 ## 开发
 
-项目结构见 [structure](structure.md)。
-
-### 先决条件
-
-- Node.js 18+
-- npm
-
-### 设置
+项目结构见 [structure.md](structure.md)。开发环境需要 Node.js 18+ 和 npm。
 
 ```bash
 npm install
 npm run start
 ```
 
-### 构建
+热重载开发建议使用单独的 Zotero profile。构建安装包：
 
 ```bash
 npm run build
 ```
 
-构建成功后，版本化的 XPI 文件位于：
+XPI 位于 `.scaffold/build/doi2pdf-v<version>.xpi`；版本也可从 `.scaffold/build/addon/manifest.json` 确认。
+按上面的[安装步骤](#安装)安装 XPI，安装前关闭正在运行的开发实例或旧的开发安装。
+
+## 原理与实现细节
+
+### 文献创建与 PDF 获取
+
+`add-doi` 复用 Zotero 内部的 Add Item by Identifier 能力，先保存或复用
+元数据，再单独获取 PDF。并发的同一 DOI 导入共享元数据创建任务，同一条目的
+全文请求也共享下载任务。已有可访问的 PDF 直接复用；网页快照和丢失的文件不算成功。
+
+常规下载和出版社备用路线都先保存临时文件，再统一校验和导入。
+即使常规下载晚到，也只保存一份 PDF，晚到文件在任务结束后清理。
+
+### 备用下载的触发与超时
+
+对支持的 Nature 和 PNAS 主刊条目，常规获取提前失败或未找到 PDF 时立即启动
+备用路线；常规获取开始后 8 秒仍未成功时，也启动备用路线。
+8 秒等待发生在父条目确定后的全文阶段，不包含元数据查询时间。
+每个出版社备用任务的预算为 20 秒，不能将这两个数值视为整个 API 请求的耗时上限。
+
+### Nature 官网下载
+
+插件直接调用系统 curl，不经过 shell，也不需要外部脚本：
+Windows 使用系统目录中的 `curl.exe`，其他系统在 PATH 中查找 `curl`。
+同一次任务使用独立的临时 Cookie 文件访问 DOI 对应的文章页和 PDF。
+
+核对文章页 DOI 后，优先读取官网正文 PDF 下载按钮，没有按钮时才使用
+`citation_pdf_url` 元数据。提前发布文章的正文链接可能以 `_reference.pdf` 结尾，
+而元数据中的 `.pdf` 地址可能返回 HTML；插件使用网页提供的实际链接。
+PDF 链接需要符合允许的 HTTPS 出版社域名，并校验下载文件的 PDF 文件头。
+
+### PNAS 官网下载
+
+PNAS 主刊（`10.1073/pnas.*`）通过已安装的 Google Chrome 下载。
+插件使用独立 profile 和本地 CDP 连接，不需要 Node、Playwright 或额外下载浏览器。
+Chrome 使用非零调试端口，不启用 headless，不修改网页中的浏览器标记。
+
+插件先核对官网元数据的 DOI 和 `citation_pdf_url`，再访问对应的 `/doi/pdf/`
+下载地址，通过 Chrome 原生下载事件确认文件完成，并校验 PDF 文件头。
+不同条目共用一个专用 profile，任务串行运行；20 秒预算包含排队、Chrome 启动和下载。
+PNAS Nexus 使用不同平台，本版本没有其出版社专用备用路线。
+
+### 下载诊断
+
+成功结果的 `fullText.source` 表示 PDF 来源：
+
+| 来源       | 含义               |
+| ---------- | ------------------ |
+| `existing` | 已有附件           |
+| `native`   | Zotero 常规下载    |
+| `nature`   | Nature 官网下载    |
+| `pnas`     | PNAS 官网下载      |
+| `local`    | 手动提供的本地 PDF |
+
+自动获取结果还包含 `attempts` 诊断。Nature 或 PNAS 下载成功时，
+`fullText.timings` 提供 `articleMs`、`pdfMs` 和 `totalMs`，单位为毫秒；
+总时间包含启动、网页解析和文件校验，PNAS 还包含排队，不包含附件入库。
+
+下载异常时保留元数据，并通过 `fullText.message` 报告原因。
+系统缺少 curl、Chrome 启动失败或 profile 被占用，都可能导致备用下载失败。
+PNAS 常见错误码：
+
+| 错误码                 | 含义                               |
+| ---------------------- | ---------------------------------- |
+| `CHROME_NOT_FOUND`     | 未找到已安装的 Google Chrome       |
+| `NEEDS_BROWSER_ACCESS` | 检测到网站验证页，且 20 秒内未完成 |
+| `PNAS_TIMEOUT`         | 其他 PNAS 备用任务超时             |
+
+浏览器下载仍受网站验证和访问权限限制。超时会终止本次任务启动的 curl 或 Chrome 子进程。
+
+### 运行数据与清理
+
+运行数据目录从 `Zotero.DataDirectory.dir` 读取，即 Zotero 设置中的数据目录。
+构建产物和 XPI 不包含开发机器的数据路径：
 
 ```text
-.scaffold/build/doi2pdf-v<version>.xpi
+<Zotero 数据目录>/doi2pdf/
+  chrome_profile/       Chrome 配置、Cookie 和缓存，跨任务与插件升级保留
+  downloads/            各任务的独立暂存目录，完成或失败后清理
 ```
 
-例如，当前版本的文件名为 `doi2pdf-v0.1.4.xpi`。文件名即为构建版本；也可以
-读取 `.scaffold/build/addon/manifest.json` 的 `version` 字段确认。
+常规下载、Nature curl 和 PNAS Chrome 都在 `downloads` 下使用独立的
+`doi2pdf-*` 目录。任务只清理自己的暂存文件和临时 Cookie，不删除文献数据库、
+已有附件或 Chrome profile；profile 中的会话保留。
 
-这是可以交给 Zotero 安装的发布包，不要直接把源码目录或
-`.scaffold/build/addon` 目录作为插件安装。可以用以下命令确认包内包含
-插件入口脚本：
+修改 Zotero 数据目录并重启后，新任务使用新路径，旧目录不自动迁移或删除。
+插件设置由 Zotero 的偏好设置系统管理，Chrome 配置保存在上述 profile 中。
 
-```powershell
-tar -tf .scaffold/build/doi2pdf-v0.1.4.xpi | Select-String '^(bootstrap.js|manifest.json|content/scripts/doi2pdf.js)$'
-```
+## 项目来源与许可证
 
-手动安装本地构建包：
-
-1. 关闭正在运行的 Zotero 开发实例或旧的 doi2pdf 开发安装。
-2. 启动 Zotero，转到 `工具 > 插件`。
-3. 点击齿轮图标，选择 `从文件安装插件...`。
-4. 选择 `.scaffold/build/doi2pdf-v<version>.xpi`。
-5. 按提示重启 Zotero，并在插件列表中确认 `doi2pdf` 已出现。
-
-如果使用 `npm run start` 做热重载，建议在单独的 Zotero profile 中运行；开发
-安装记录不应当替代正常的 XPI 安装记录。
-
-### 代码检查
-
-```bash
-npm run lint:check
-```
-
-离线回归测试（不会启动 Zotero 或修改文献库）：
-
-```bash
-npm run test:unit
-```
-
-## 许可证
-
-AGPL-3.0-or-later
-
-## 贡献
-
-欢迎贡献！请随时提交 Pull Request。
+本项目基于 [GOKORURI007/zotero-api-plus](https://github.com/GOKORURI007/zotero-api-plus)
+的 `v0.2.1` 继续开发，使用 [AGPL-3.0-or-later](LICENSE) 许可证。
+欢迎通过 Issue 和 Pull Request 反馈问题或贡献改进。
