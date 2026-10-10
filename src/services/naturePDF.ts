@@ -164,13 +164,18 @@ export async function downloadNaturePDF(
         throw new Error(
           "Nature page DOI is missing or does not match the parent item",
         );
+      // Advance publications can advertise a .pdf URL that redirects to HTML.
+      // Nature's main download button points to the available _reference.pdf.
       const link =
         document
-          .querySelector('meta[name="citation_pdf_url"]')
-          ?.getAttribute("content") ||
+          .querySelector('a[data-article-pdf="true"]')
+          ?.getAttribute("href") ||
         document
           .querySelector('a[data-track-action="download pdf"]')
-          ?.getAttribute("href");
+          ?.getAttribute("href") ||
+        document
+          .querySelector('meta[name="citation_pdf_url"]')
+          ?.getAttribute("content");
       if (!link) throw new Error("Nature article has no main PDF link");
       const pdfURL = new win.URL(link, finalURL);
       const allowedHost =

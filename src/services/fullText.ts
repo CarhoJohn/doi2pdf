@@ -10,7 +10,8 @@ import {
 import { canFetchNaturePDF, downloadNaturePDF } from "./naturePDF";
 import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
 
-export const NATIVE_WAIT_MS = 15_000;
+// Start the Nature/PNAS fallback after 8 seconds without a native PDF.
+export const NATIVE_WAIT_MS = 8_000;
 export type FullTextStatus = "found" | "not_found" | "failed";
 export interface FullTextResult {
   status: FullTextStatus;
@@ -96,7 +97,7 @@ async function downloadNativePDF(
  * Coordinate native and publisher downloads, committing only one attachment.
  *
  * Args:
- *   item: Parent resolved before the 15-second download timer starts.
+ *   item: Parent resolved before the 8-second download timer starts.
  *   methods: Optional native resolver order.
  * Returns:
  *   PDF status, attachment identifiers, and download-route diagnostics.
