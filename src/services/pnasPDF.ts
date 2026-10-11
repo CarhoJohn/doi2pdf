@@ -31,7 +31,7 @@ export function stopPNASDownloads(): void {
  *   item: Existing parent whose DOI must match publisher metadata.
  * Returns:
  *   A validated temporary PDF; its caller owns cleanup. Queueing, startup,
- *   and download share one 20-second budget.
+ *   and download share one 30-second budget.
  */
 export async function downloadPNASPDF(
   item: Zotero.Item,
@@ -49,7 +49,7 @@ export async function downloadPNASPDF(
     () =>
       new IdentifierError(
         challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
-        "PNAS fallback timed out after 20 seconds" +
+        "PNAS fallback timed out after 30 seconds" +
           (challenge
             ? "; publisher browser verification did not complete"
             : ""),

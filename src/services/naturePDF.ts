@@ -63,7 +63,7 @@ export async function downloadNaturePDF(
     () => {
       if (process) void process.kill(0).catch(Zotero.logError);
     },
-    () => new Error("Nature fallback timed out after 20 seconds"),
+    () => new Error("Nature fallback timed out after 30 seconds"),
   );
 
   /**

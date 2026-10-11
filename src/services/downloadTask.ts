@@ -1,7 +1,7 @@
 import type { PDFCandidate } from "./pdf";
 
-/** Publisher fallback budget, including queueing and process startup. */
-export const PDF_FALLBACK_TIMEOUT_MS = 20_000;
+/** Allow publisher startup and PDF transfer to share a 30-second budget. */
+export const PDF_FALLBACK_TIMEOUT_MS = 30_000;
 
 /** Own a fallback deadline, cancellation, and cleanup of late PDF results. */
 export class DownloadTask {

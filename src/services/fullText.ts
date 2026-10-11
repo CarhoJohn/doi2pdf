@@ -35,6 +35,69 @@ interface DownloadOutcome {
   code?: string;
 }
 
+/**
+ * Announce the final PDF result once a publisher fallback has been attempted.
+ *
+ * Args:
+ *   item: Parent whose title and DOI identify the download.
+ *   publisher: Attempted publisher, or undefined when no fallback ran.
+ *   result: Final retrieval and attachment-import result.
+ * Returns:
+ *   The unchanged result, even if the notification cannot be displayed.
+ */
+function notifyFallbackResult(
+  item: Zotero.Item,
+  publisher: "nature" | "pnas" | undefined,
+  result: FullTextResult,
+): FullTextResult {
+  if (!publisher) return result;
+  try {
+    const success = result.status === "found";
+    const source =
+      result.source === "native"
+        ? "常规路线"
+        : publisher === "pnas"
+          ? "PNAS"
+          : "Nature";
+    const doi = normalizeDOI(item.getField("DOI"));
+    const title = String(item.getField("title")).replace(/\s+/g, " ").trim();
+    const label = title.length > 70 ? title.slice(0, 69) + "…" : title;
+    const popup = new ztoolkit.ProgressWindow("doi2pdf", {
+      closeOnClick: true,
+      closeTime: success ? 3000 : 5000,
+    });
+    // Native progress-window links support styling, keeping the symbol colored.
+    const link = doi
+      ? ` href="https://doi.org/${encodeURIComponent(doi)}"`
+      : "";
+    popup.addDescription(
+      `<a${link} style="color:${success ? "#16803c" : "#c62828"};text-decoration:none">${success ? "✔ PDF 已保存" : "❌ PDF 下载失败"}（${source}）</a>`,
+    );
+    popup.createLine({ text: label || doi || "文献", progress: 100 });
+    if (doi && label) popup.createLine({ text: doi, progress: 100 });
+    if (!success) {
+      const reason =
+        result.code === "NEEDS_BROWSER_ACCESS"
+          ? "网站验证未完成"
+          : result.code === "CHROME_NOT_FOUND"
+            ? "未找到 Google Chrome"
+            : /timed out|timeout/i.test(result.message || "")
+              ? "下载超时（30 秒）"
+              : result.code === "DOI_MISMATCH"
+                ? "网页 DOI 与文献不匹配"
+                : result.status === "not_found"
+                  ? "未找到可下载的 PDF"
+                  : "未能下载或保存 PDF";
+      popup.createLine({ text: reason, progress: 100 });
+    }
+    popup.show();
+  } catch (error) {
+    // A UI failure must not turn a saved PDF into a failed API response.
+    Zotero.logError(error as Error);
+  }
+  return result;
+}
+
 /** The native methods exist in Zotero 9/10 but bundled typings lag behind. */
 interface NativeDownloader {
   getFileResolvers?: (item: Zotero.Item, methods?: string[]) => unknown[];
@@ -162,7 +225,7 @@ async function resolveFullText(
             code: error?.code,
           }),
         );
-        // A late native success may still win during the 20-second fallback budget.
+        // A late native success may still win during the 30-second fallback budget.
         // Native failures never suppress a running publisher attempt.
         const nativeSuccess = native.then((result) =>
           result.candidate ? result : new Promise<DownloadOutcome>(() => {}),
@@ -180,12 +243,12 @@ async function resolveFullText(
         message: outcome.message,
         code: outcome.code,
       });
-      return {
+      return notifyFallbackResult(item, fallback ? fallbackSource : undefined, {
         status: outcome.message ? "failed" : "not_found",
         message: outcome.message,
         attempts,
         code: outcome.code,
-      };
+      });
     }
     // Both routes and manual PDF imports use the same per-item write lock.
     const attachment = await importPDF(
@@ -195,21 +258,21 @@ async function resolveFullText(
       candidate.url,
     );
     attempts.push({ source: candidate.source, status: "found" });
-    return {
+    return notifyFallbackResult(item, fallback ? fallbackSource : undefined, {
       status: "found",
       source: candidate.source,
       attachmentID: attachment.id,
       attachmentKey: attachment.key,
       timings: candidate.timings,
       attempts,
-    };
+    });
   } catch (error) {
     Zotero.logError(error as Error);
-    return {
+    return notifyFallbackResult(item, fallback ? fallbackSource : undefined, {
       status: "failed",
       message: error instanceof Error ? error.message : String(error),
       attempts,
-    };
+    });
   } finally {
     closed = true;
     win.clearTimeout(timer);
