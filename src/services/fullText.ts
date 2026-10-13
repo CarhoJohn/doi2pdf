@@ -37,6 +37,13 @@ interface DownloadOutcome {
   code?: string;
 }
 
+/** Publisher strategy used only by this module's full-text coordinator. */
+interface PublisherPDFRoute {
+  source: "cell" | "pnas" | "nature";
+  nativeFirst: boolean;
+  download: () => Promise<PDFCandidate>;
+}
+
 /**
  * Announce the final PDF result once a publisher fallback has been attempted.
  *
@@ -161,6 +168,40 @@ async function downloadNativePDF(
 }
 
 /**
+ * Select the journal transport and whether Zotero should get the first attempt.
+ *
+ * Args:
+ *   item: Bibliographic parent with DOI and available journal metadata.
+ * Returns:
+ *   A bound publisher strategy, or undefined for native-only retrieval.
+ */
+async function selectPublisherPDF(
+  item: Zotero.Item,
+): Promise<PublisherPDFRoute | undefined> {
+  // Cell identity comes from journal metadata; DOI prefixes alone are ambiguous.
+  const cell = await getCellArticle(item);
+  if (cell)
+    return {
+      source: "cell",
+      nativeFirst: false,
+      download: () => downloadCellPDF(item, cell),
+    };
+  if (canFetchPNASPDF(item))
+    return {
+      source: "pnas",
+      nativeFirst: true,
+      download: () => downloadPNASPDF(item),
+    };
+  if (canFetchNaturePDF(item))
+    return {
+      source: "nature",
+      nativeFirst: true,
+      download: () => downloadNaturePDF(item),
+    };
+  return undefined;
+}
+
+/**
  * Coordinate native and publisher downloads, committing only one attachment.
  *
  * Args:
@@ -180,13 +221,7 @@ async function resolveFullText(
   const win = Zotero.getMainWindow();
   const attempts: NonNullable<FullTextResult["attempts"]> = [];
   const expectedDOI = normalizeDOI(item.getField("DOI")) ?? undefined;
-  let fallbackSource: "pnas" | "nature" | "cell" | undefined = canFetchPNASPDF(
-    item,
-  )
-    ? "pnas"
-    : canFetchNaturePDF(item)
-      ? "nature"
-      : undefined;
+  let fallbackSource: PublisherPDFRoute["source"] | undefined;
   try {
     const existing = await getPDFAttachment(item);
     if (existing)
@@ -196,26 +231,39 @@ async function resolveFullText(
         attachmentID: existing.id,
         attachmentKey: existing.key,
       };
-    const cell = await getCellArticle(item);
-    let outcome: DownloadOutcome;
-    if (cell) {
-      // Cell goes directly to its browser transport; generic resolvers may
-      // otherwise navigate to ScienceDirect before the fallback timer expires.
-      fallbackSource = "cell";
-      fallback = downloadCellPDF(item, cell).then(
+    const publisher = await selectPublisherPDF(item);
+    fallbackSource = publisher?.source;
+
+    /**
+     * Start the selected transport with common failure diagnostics.
+     *
+     * Args:
+     *   route: Publisher strategy already selected for this parent.
+     * Returns:
+     *   The publisher outcome, also retained for late-result cleanup.
+     */
+    function startFallback(route: PublisherPDFRoute): Promise<DownloadOutcome> {
+      fallback = route.download().then(
         (candidate) => ({ candidate }),
         (error) => ({
           message: error?.message || String(error),
           code: error?.code,
         }),
       );
-      outcome = await fallback;
+      return fallback;
+    }
+
+    let outcome: DownloadOutcome;
+    if (publisher && !publisher.nativeFirst) {
+      // Cell goes directly to its browser transport; generic resolvers may
+      // otherwise navigate to ScienceDirect before the fallback timer expires.
+      outcome = await startFallback(publisher);
     } else {
       native = downloadNativePDF(item, methods, () => closed).then(
         (candidate) => ({ candidate }),
         (error) => ({ message: error?.message || String(error) }),
       );
-      if (fallbackSource) {
+      if (publisher) {
         // A timer observes the task; it does not cancel or detach the parent item.
         const threshold = new Promise<undefined>((resolve) => {
           timer = win.setTimeout(() => resolve(undefined), NATIVE_WAIT_MS);
@@ -234,23 +282,13 @@ async function resolveFullText(
                 : "timeout",
             message: initial?.message,
           });
-          fallback = (
-            fallbackSource === "pnas"
-              ? downloadPNASPDF(item)
-              : downloadNaturePDF(item)
-          ).then(
-            (candidate) => ({ candidate }),
-            (error) => ({
-              message: error?.message || String(error),
-              code: error?.code,
-            }),
-          );
+          const publisherOutcome = startFallback(publisher);
           // A late native success may still win during the 30-second fallback budget.
           // Native failures never suppress a running publisher attempt.
           const nativeSuccess = native.then((result) =>
             result.candidate ? result : new Promise<DownloadOutcome>(() => {}),
           );
-          outcome = await Promise.race([nativeSuccess, fallback]);
+          outcome = await Promise.race([nativeSuccess, publisherOutcome]);
         }
       } else {
         outcome = await native;

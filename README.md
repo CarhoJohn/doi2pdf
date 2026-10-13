@@ -246,10 +246,12 @@ PDF 链接需要符合允许的 HTTPS 出版社域名，并校验下载文件的
 
 PNAS 主刊（`10.1073/pnas.*`）通过已安装的 Google Chrome 下载。
 插件使用独立 profile 和本地 CDP 连接，不需要 Node、Playwright 或额外下载浏览器。
-Chrome 使用非零调试端口，不启用 headless，不修改网页中的浏览器标记。
+Chrome 使用非零调试端口，保持有头模式并最小化窗口，不修改网页中的浏览器标记。
 
 插件先核对官网元数据的 DOI 和 `citation_pdf_url`，再访问对应的 `/doi/pdf/`
-下载地址，通过 Chrome 原生下载事件确认文件完成，并校验 PDF 文件头。
+下载地址，与 Cell 共用响应流下载函数：在响应头阶段拦截浏览器已认证的 PDF，
+分块读取到流结束后校验 PDF 文件头，不依赖下载事件、PDF 查看器或保存对话框。
+HTTP 访问错误直接返回诊断；网站验证响应继续交给浏览器处理，直到下载成功或预算到期。
 不同条目共用一个专用 profile，任务串行运行；30 秒预算包含排队、Chrome 启动和下载。
 PNAS Nexus 使用不同平台，本版本没有其出版社专用备用路线。
 
@@ -303,6 +305,7 @@ Nature、PNAS 或 Cell 官网路线启动后，任务结束会在 Zotero 右下�
 | `CHROME_NOT_FOUND`     | 未找到已安装的 Google Chrome   |
 | `NEEDS_BROWSER_ACCESS` | 网站验证未在相应任务预算内完成 |
 | `PNAS_TIMEOUT`         | 其他 PNAS 备用任务超时         |
+| `PNAS_PDF_UNAVAILABLE` | PNAS 返回 PDF 访问错误状态     |
 | `CELL_TIMEOUT`         | Cell 浏览器任务超时            |
 | `PII_NOT_FOUND`        | 已识别 Cell，但没有文章 PII    |
 | `JOURNAL_MISMATCH`     | 期刊证据不一致                 |

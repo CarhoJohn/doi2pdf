@@ -1,7 +1,6 @@
 import { IdentifierError, normalizeDOI } from "./identifier";
-import { createPDFTemp, stagePDF, PDFCandidate, validatePDF } from "./pdf";
-import { DownloadTask } from "./downloadTask";
-import { ChromeSession, queueChromeDownload } from "./chromeSession";
+import type { PDFCandidate } from "./pdf";
+import { downloadBrowserPDF, openBrowserPDFStream } from "./browserPDF";
 
 /**
  * Identify PNAS main-journal DOIs; PNAS Nexus uses another platform.
@@ -16,7 +15,7 @@ export function canFetchPNASPDF(item: Zotero.Item): boolean {
 }
 
 /**
- * Stage a DOI-matched PNAS PDF through a dedicated Chrome process.
+ * Stage a DOI-matched PNAS PDF from a dedicated Chrome response stream.
  *
  * Args:
  *   item: Existing parent whose DOI must match publisher metadata.
@@ -33,108 +32,39 @@ export async function downloadPNASPDF(
   const win = Zotero.getMainWindow();
   const pdfURL = "https://www.pnas.org/doi/pdf/" + doi;
   const pdfDownloadURL = pdfURL + "?download=true";
-  let download: { guid: string; state?: string } | undefined;
-  const task: DownloadTask = new DownloadTask(
-    (error) => browser.cancel(error),
-    () =>
-      new IdentifierError(
-        browser.challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
-        "PNAS fallback timed out after 30 seconds" +
-          (browser.challenge
-            ? "; publisher browser verification did not complete"
-            : ""),
-      ),
+  return downloadBrowserPDF(
+    {
+      source: "pnas",
+      timeoutMs: 30_000,
+      timeoutMessage: "PNAS fallback timed out after 30 seconds",
+    },
+    async (context) => {
+      const { browser } = context;
+      const { sessionId, save } = await openBrowserPDFStream(context, {
+        publisher: "PNAS",
+        pdfURL: pdfDownloadURL,
+      });
+      const articleStarted = Date.now();
+      await browser.command(
+        "Page.navigate",
+        { url: "https://www.pnas.org/doi/" + doi },
+        sessionId,
+      );
+      const page = await browser.readArticle(sessionId, doi, "PNAS");
+      const url = new win.URL(page.url);
+      if (url.protocol !== "https:" || url.hostname !== "www.pnas.org")
+        throw new Error("PNAS article redirected to an unexpected publisher");
+      const articleMs = Date.now() - articleStarted;
+      if (page.pdf !== pdfURL)
+        throw new Error("PNAS article has an unexpected PDF URL");
+      const pdfStarted = Date.now();
+      // Consume the authenticated response before Chrome opens its PDF viewer.
+      await save();
+      return {
+        url: pdfURL,
+        articleMs,
+        pdfStarted,
+      };
+    },
   );
-  const browser = new ChromeSession(task);
-  return queueChromeDownload(task, async (): Promise<PDFCandidate> => {
-    task.check();
-    const temporary = createPDFTemp("pnas");
-    const directory = Zotero.File.pathToFile(temporary.path).parent!;
-    return stagePDF(temporary, async () => {
-      try {
-        await browser.start(directory, (message) => {
-          if (
-            message.method === "Browser.downloadWillBegin" &&
-            message.params.url === pdfDownloadURL
-          )
-            download = message.params;
-          if (
-            message.method === "Browser.downloadProgress" &&
-            message.params.guid === download?.guid
-          )
-            download = { ...download!, state: message.params.state };
-        });
-        await browser.command("Browser.setDownloadBehavior", {
-          behavior: "allowAndName",
-          downloadPath: directory.path,
-          eventsEnabled: true,
-        });
-        const { targetId } = await browser.command("Target.createTarget", {
-          url: "about:blank",
-        });
-        const { sessionId } = await browser.command("Target.attachToTarget", {
-          targetId,
-          flatten: true,
-        });
-        const articleStarted = Date.now();
-        await browser.command(
-          "Page.navigate",
-          { url: "https://www.pnas.org/doi/" + doi },
-          sessionId,
-        );
-        const page = await browser.readArticle(sessionId, doi, "PNAS");
-        const url = new win.URL(page.url);
-        if (url.protocol !== "https:" || url.hostname !== "www.pnas.org")
-          throw new Error("PNAS article redirected to an unexpected publisher");
-        const articleMs = Date.now() - articleStarted;
-        if (page.pdf !== pdfURL)
-          throw new Error("PNAS article has an unexpected PDF URL");
-        const pdfStarted = Date.now();
-        await browser.command(
-          "Page.navigate",
-          { url: pdfDownloadURL },
-          sessionId,
-        );
-        while (download?.state !== "completed") {
-          task.check();
-          if (browser.exited)
-            throw new Error("Dedicated Chrome exited during PDF download");
-          if (download?.state === "canceled")
-            throw new Error("Chrome canceled the PNAS PDF download");
-          if (!download) {
-            const response = await browser.command(
-              "Runtime.evaluate",
-              { expression: "document.title", returnByValue: true },
-              sessionId,
-            );
-            browser.challenge =
-              /just a moment|请稍候|security verification/i.test(
-                response.result?.value || "",
-              );
-          }
-          await new Promise((resolve) => win.setTimeout(resolve, 100));
-        }
-        // The task directory, URL and browser event identify this download uniquely.
-        if (!/^[a-f0-9-]{36}$/i.test(download.guid))
-          throw new Error("Chrome returned an invalid download identifier");
-        const file = directory.clone();
-        file.append(download.guid);
-        await validatePDF(file.path);
-        task.check();
-        file.moveTo(directory, "article.pdf");
-        return {
-          ...temporary,
-          source: "pnas",
-          url: pdfURL,
-          timings: {
-            articleMs,
-            pdfMs: Date.now() - pdfStarted,
-            totalMs: Date.now() - task.started,
-          },
-        };
-      } finally {
-        await browser.close();
-      }
-    });
-  });
 }
