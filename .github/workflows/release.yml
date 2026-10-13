@@ -17,5 +17,8 @@ jobs:
     # If you omit an input, its default value will be used.
     with:
       build: "npm run build"
-      release: "npm run release"
+      # Scaffold hardcodes the release title; use the version tag after publishing.
+      release: |
+        npm run release
+        gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
     secrets: inherit
