@@ -9,10 +9,7 @@ export class DownloadTask {
   private readonly win = Zotero.getMainWindow();
   /** First cancellation reason; unset while the task may still complete. */
   error?: Error;
-  private readonly timer = this.win.setTimeout(
-    () => this.cancel(),
-    PDF_FALLBACK_TIMEOUT_MS,
-  );
+  private readonly timer: number;
   private reject!: (error: Error) => void;
   private readonly cancellation = new Promise<never>((_, reject) => {
     this.reject = reject;
@@ -24,11 +21,16 @@ export class DownloadTask {
    * Args:
    *   onCancel: Stop only resources owned by this task.
    *   timeoutError: Build the publisher-specific timeout error.
+   *   timeoutMs: Whole-task budget; existing publishers default to 30 seconds.
    */
   constructor(
     private readonly onCancel: (error: Error) => void,
     private readonly timeoutError: () => Error,
-  ) {}
+    private readonly timeoutMs = PDF_FALLBACK_TIMEOUT_MS,
+  ) {
+    // Initialize after the chosen budget is assigned, before any queued work.
+    this.timer = this.win.setTimeout(() => this.cancel(), timeoutMs);
+  }
 
   /**
    * Check that work may continue.
@@ -37,7 +39,7 @@ export class DownloadTask {
    *   Milliseconds remaining, or throws the cancellation reason.
    */
   check(): number {
-    const remaining = this.started + PDF_FALLBACK_TIMEOUT_MS - Date.now();
+    const remaining = this.started + this.timeoutMs - Date.now();
     if (remaining <= 0) this.cancel();
     if (this.error) throw this.error;
     return remaining;

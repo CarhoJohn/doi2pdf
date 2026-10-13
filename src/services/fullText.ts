@@ -9,6 +9,8 @@ import {
 } from "./pdf";
 import { canFetchNaturePDF, downloadNaturePDF } from "./naturePDF";
 import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
+import { getCellArticle } from "./cellMetadata";
+import { downloadCellPDF } from "./cellPDF";
 
 // Start the Nature/PNAS fallback after 8 seconds without a native PDF.
 export const NATIVE_WAIT_MS = 8_000;
@@ -47,7 +49,7 @@ interface DownloadOutcome {
  */
 function notifyFallbackResult(
   item: Zotero.Item,
-  publisher: "nature" | "pnas" | undefined,
+  publisher: "nature" | "pnas" | "cell" | undefined,
   result: FullTextResult,
 ): FullTextResult {
   if (!publisher) return result;
@@ -56,9 +58,11 @@ function notifyFallbackResult(
     const source =
       result.source === "native"
         ? "常规路线"
-        : publisher === "pnas"
-          ? "PNAS"
-          : "Nature";
+        : publisher === "cell"
+          ? "Cell Press"
+          : publisher === "pnas"
+            ? "PNAS"
+            : "Nature";
     const doi = normalizeDOI(item.getField("DOI"));
     const title = String(item.getField("title")).replace(/\s+/g, " ").trim();
     const label = title.length > 70 ? title.slice(0, 69) + "…" : title;
@@ -82,7 +86,7 @@ function notifyFallbackResult(
           : result.code === "CHROME_NOT_FOUND"
             ? "未找到 Google Chrome"
             : /timed out|timeout/i.test(result.message || "")
-              ? "下载超时（30 秒）"
+              ? `下载超时（${publisher === "cell" ? 60 : 30} 秒）`
               : result.code === "DOI_MISMATCH"
                 ? "网页 DOI 与文献不匹配"
                 : result.status === "not_found"
@@ -176,7 +180,9 @@ async function resolveFullText(
   const win = Zotero.getMainWindow();
   const attempts: NonNullable<FullTextResult["attempts"]> = [];
   const expectedDOI = normalizeDOI(item.getField("DOI")) ?? undefined;
-  const fallbackSource = canFetchPNASPDF(item)
+  let fallbackSource: "pnas" | "nature" | "cell" | undefined = canFetchPNASPDF(
+    item,
+  )
     ? "pnas"
     : canFetchNaturePDF(item)
       ? "nature"
@@ -190,50 +196,65 @@ async function resolveFullText(
         attachmentID: existing.id,
         attachmentKey: existing.key,
       };
-    native = downloadNativePDF(item, methods, () => closed).then(
-      (candidate) => ({ candidate }),
-      (error) => ({ message: error?.message || String(error) }),
-    );
+    const cell = await getCellArticle(item);
     let outcome: DownloadOutcome;
-    if (fallbackSource) {
-      // A timer observes the task; it does not cancel or detach the parent item.
-      const threshold = new Promise<undefined>((resolve) => {
-        timer = win.setTimeout(() => resolve(undefined), NATIVE_WAIT_MS);
-      });
-      const initial = await Promise.race([native, threshold]);
-      win.clearTimeout(timer);
-      if (initial?.candidate) {
-        outcome = initial;
-      } else {
-        attempts.push({
-          source: "native",
-          status: initial?.message
-            ? "failed"
-            : initial
-              ? "not_found"
-              : "timeout",
-          message: initial?.message,
-        });
-        fallback = (
-          fallbackSource === "pnas"
-            ? downloadPNASPDF(item)
-            : downloadNaturePDF(item)
-        ).then(
-          (candidate) => ({ candidate }),
-          (error) => ({
-            message: error?.message || String(error),
-            code: error?.code,
-          }),
-        );
-        // A late native success may still win during the 30-second fallback budget.
-        // Native failures never suppress a running publisher attempt.
-        const nativeSuccess = native.then((result) =>
-          result.candidate ? result : new Promise<DownloadOutcome>(() => {}),
-        );
-        outcome = await Promise.race([nativeSuccess, fallback]);
-      }
+    if (cell) {
+      // Cell goes directly to its browser transport; generic resolvers may
+      // otherwise navigate to ScienceDirect before the fallback timer expires.
+      fallbackSource = "cell";
+      fallback = downloadCellPDF(item, cell).then(
+        (candidate) => ({ candidate }),
+        (error) => ({
+          message: error?.message || String(error),
+          code: error?.code,
+        }),
+      );
+      outcome = await fallback;
     } else {
-      outcome = await native;
+      native = downloadNativePDF(item, methods, () => closed).then(
+        (candidate) => ({ candidate }),
+        (error) => ({ message: error?.message || String(error) }),
+      );
+      if (fallbackSource) {
+        // A timer observes the task; it does not cancel or detach the parent item.
+        const threshold = new Promise<undefined>((resolve) => {
+          timer = win.setTimeout(() => resolve(undefined), NATIVE_WAIT_MS);
+        });
+        const initial = await Promise.race([native, threshold]);
+        win.clearTimeout(timer);
+        if (initial?.candidate) {
+          outcome = initial;
+        } else {
+          attempts.push({
+            source: "native",
+            status: initial?.message
+              ? "failed"
+              : initial
+                ? "not_found"
+                : "timeout",
+            message: initial?.message,
+          });
+          fallback = (
+            fallbackSource === "pnas"
+              ? downloadPNASPDF(item)
+              : downloadNaturePDF(item)
+          ).then(
+            (candidate) => ({ candidate }),
+            (error) => ({
+              message: error?.message || String(error),
+              code: error?.code,
+            }),
+          );
+          // A late native success may still win during the 30-second fallback budget.
+          // Native failures never suppress a running publisher attempt.
+          const nativeSuccess = native.then((result) =>
+            result.candidate ? result : new Promise<DownloadOutcome>(() => {}),
+          );
+          outcome = await Promise.race([nativeSuccess, fallback]);
+        }
+      } else {
+        outcome = await native;
+      }
     }
     const candidate = outcome.candidate;
     if (!candidate) {
@@ -271,6 +292,7 @@ async function resolveFullText(
     return notifyFallbackResult(item, fallback ? fallbackSource : undefined, {
       status: "failed",
       message: error instanceof Error ? error.message : String(error),
+      code: (error as { code?: string })?.code,
       attempts,
     });
   } finally {

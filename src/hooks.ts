@@ -1,6 +1,6 @@
 import { getString, initLocale } from "./utils/locale";
 import { createZToolkit } from "./utils/ztoolkit";
-import { stopPNASDownloads } from "./services/pnasPDF";
+import { stopChromeDownloads } from "./services/chromeSession";
 
 let preferencePaneID: string | undefined;
 
@@ -45,7 +45,7 @@ async function onStartup() {
   await registerPreferencePane();
 
   addon.registerEndpoints();
-  Zotero.addShutdownListener(stopPNASDownloads);
+  Zotero.addShutdownListener(stopChromeDownloads);
 
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
@@ -96,7 +96,7 @@ async function onMainWindowUnload(win: Window): Promise<void> {
 }
 
 function onShutdown(): void {
-  stopPNASDownloads();
+  stopChromeDownloads();
   if (preferencePaneID) {
     Zotero.PreferencePanes.unregister(preferencePaneID);
     preferencePaneID = undefined;

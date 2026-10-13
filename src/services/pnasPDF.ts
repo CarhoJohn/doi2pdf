@@ -1,11 +1,7 @@
 import { IdentifierError, normalizeDOI } from "./identifier";
 import { createPDFTemp, stagePDF, PDFCandidate, validatePDF } from "./pdf";
 import { DownloadTask } from "./downloadTask";
-import { ChromeSession } from "./chromeSession";
-
-// Only one task may own the plugin's shared Chrome profile at a time.
-let queue: Promise<unknown> = Promise.resolve();
-const cancellations = new Set<() => void>();
+import { ChromeSession, queueChromeDownload } from "./chromeSession";
 
 /**
  * Identify PNAS main-journal DOIs; PNAS Nexus uses another platform.
@@ -17,11 +13,6 @@ const cancellations = new Set<() => void>();
  */
 export function canFetchPNASPDF(item: Zotero.Item): boolean {
   return /^10\.1073\/pnas\./.test(normalizeDOI(item.getField("DOI")) || "");
-}
-
-/** Cancel plugin-owned downloads on shutdown, preserving the Chrome profile. */
-export function stopPNASDownloads(): void {
-  for (const cancel of cancellations) cancel();
 }
 
 /**
@@ -40,26 +31,22 @@ export async function downloadPNASPDF(
   if (!doi || !/^10\.1073\/pnas\./.test(doi))
     throw new IdentifierError("INVALID_DOI", "Unsupported PNAS DOI");
   const win = Zotero.getMainWindow();
-  let challenge = false;
   const pdfURL = "https://www.pnas.org/doi/pdf/" + doi;
   const pdfDownloadURL = pdfURL + "?download=true";
   let download: { guid: string; state?: string } | undefined;
-  const task = new DownloadTask(
+  const task: DownloadTask = new DownloadTask(
     (error) => browser.cancel(error),
     () =>
       new IdentifierError(
-        challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
+        browser.challenge ? "NEEDS_BROWSER_ACCESS" : "PNAS_TIMEOUT",
         "PNAS fallback timed out after 30 seconds" +
-          (challenge
+          (browser.challenge
             ? "; publisher browser verification did not complete"
             : ""),
       ),
   );
   const browser = new ChromeSession(task);
-  const shutdown = () => task.cancel(new Error("PNAS download stopped"));
-  cancellations.add(shutdown);
-
-  const operation = queue.then(async (): Promise<PDFCandidate> => {
+  return queueChromeDownload(task, async (): Promise<PDFCandidate> => {
     task.check();
     const temporary = createPDFTemp("pnas");
     const directory = Zotero.File.pathToFile(temporary.path).parent!;
@@ -95,29 +82,7 @@ export async function downloadPNASPDF(
           { url: "https://www.pnas.org/doi/" + doi },
           sessionId,
         );
-        let page: Record<string, string | undefined> | undefined;
-        while (!page?.doi) {
-          const response = await browser.command(
-            "Runtime.evaluate",
-            {
-              expression:
-                "({doi:document.querySelector('meta[name=citation_doi]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})",
-              returnByValue: true,
-            },
-            sessionId,
-          );
-          page = response.result?.value;
-          challenge = /just a moment|请稍候|security verification/i.test(
-            page?.title || "",
-          );
-          if (!page?.doi)
-            await new Promise((resolve) => win.setTimeout(resolve, 250));
-        }
-        if (normalizeDOI(page.doi) !== doi)
-          throw new IdentifierError(
-            "DOI_MISMATCH",
-            "PNAS page DOI does not match the parent item",
-          );
+        const page = await browser.readArticle(sessionId, doi, "PNAS");
         const url = new win.URL(page.url);
         if (url.protocol !== "https:" || url.hostname !== "www.pnas.org")
           throw new Error("PNAS article redirected to an unexpected publisher");
@@ -142,9 +107,10 @@ export async function downloadPNASPDF(
               { expression: "document.title", returnByValue: true },
               sessionId,
             );
-            challenge = /just a moment|请稍候|security verification/i.test(
-              response.result?.value || "",
-            );
+            browser.challenge =
+              /just a moment|请稍候|security verification/i.test(
+                response.result?.value || "",
+              );
           }
           await new Promise((resolve) => win.setTimeout(resolve, 100));
         }
@@ -171,10 +137,4 @@ export async function downloadPNASPDF(
       }
     });
   });
-  queue = operation.catch(() => undefined);
-  try {
-    return await task.run(operation);
-  } finally {
-    cancellations.delete(shutdown);
-  }
 }

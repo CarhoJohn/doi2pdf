@@ -5,3 +5,6 @@ node_modules
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+
+# Generated journal table intentionally keeps one journal per line.
+addon/content/data/cell-press-journals.json

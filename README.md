@@ -3,7 +3,7 @@
 [![zotero target version](https://img.shields.io/badge/Zotero-9%20%7C%2010.0.x-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![License: AGPL-3.0-or-later](https://img.shields.io/github/license/CarhoJohn/doi2pdf)](LICENSE)
 
-**把 DOI 变成 Zotero 中的文献条目和 PDF 附件。** 
+**把 DOI 变成 Zotero 中的文献条目和 PDF 附件。**
 
 doi2pdf 通过 Zotero 本地 API
 接收 DOI，获取文献信息、下载 PDF，并保存到指定收藏夹（Collection），方便与Agent、脚本、文献管理工具等集成。
@@ -21,7 +21,7 @@ doi2pdf 通过 Zotero 本地 API
 ## 主要功能
 
 - **自动下载 PDF**：添加 DOI 时默认查找全文，并保存为 Zotero 附件；也可以为已有条目补充 PDF。
-- **补充出版社下载路线**：Zotero 常规获取未成功时，Nature 系列和 PNAS 主刊会尝试官网备用下载，支持 Nature 提前发布文章的 `_reference.pdf` 链接。
+- **补充出版社下载路线**：Nature 系列和 PNAS 主刊支持官网备用下载；Cell 系列识别后直接使用官网浏览器下载，支持先保存父条目再导入 PDF。
 - **减少重复导入**：按 DOI 复用已有条目，已有可访问的 PDF 时直接复用附件。
 - **指定保存位置**：在插件设置中选择默认收藏夹，支持 `父级/子级` 路径；也可在请求中指定收藏夹。
 - **导入本地 PDF**：将本机已有文件复制为附件，保留原文件。
@@ -29,7 +29,7 @@ doi2pdf 通过 Zotero 本地 API
 简单来说，插件先通过 Zotero 获取文献信息，再尝试下载全文；找不到 PDF 时仍保留
 文献条目。下载依赖当前网络的开放获取或机构访问权限。
 
-PNAS 官网备用下载需要已安装 Google Chrome，运行时可能显示专用浏览器窗口。
+PNAS 和 Cell 官网下载需要已安装 Google Chrome。Cell 使用最小化的专用窗口，启动瞬间仍可能短暂显示。
 
 ## 快速使用
 
@@ -83,13 +83,13 @@ Zotero-API-Key: <授权获得的 key>
 所有接口均以 `http://localhost:23119` 为基础地址。POST 请求使用 JSON，
 并携带当前 Zotero 要求的认证头。
 
-| 方法 | 路径                            | 用途                            |
-| ---- | ------------------------------- | ------------------------------- |
-| POST | `/api/plus/add-doi`             | 添加 DOI 并获取 PDF             |
-| POST | `/api/plus/find-fulltext`       | 为已有条目查找 PDF              |
-| POST | `/api/plus/import-pdf`          | 向已有条目导入本地 PDF          |
-| GET  | `/api/plus`                     | 检查插件是否运行                |
-| GET  | `/api/plus/selected-collection` | 获取当前选中的收藏夹            |
+| 方法 | 路径                            | 用途                   |
+| ---- | ------------------------------- | ---------------------- |
+| POST | `/api/plus/add-doi`             | 添加 DOI 并获取 PDF    |
+| POST | `/api/plus/find-fulltext`       | 为已有条目查找 PDF     |
+| POST | `/api/plus/import-pdf`          | 向已有条目导入本地 PDF |
+| GET  | `/api/plus`                     | 检查插件是否运行       |
+| GET  | `/api/plus/selected-collection` | 获取当前选中的收藏夹   |
 
 ### 接口授权
 
@@ -117,13 +117,13 @@ Zotero-API-Key: <授权获得的 key>
 }
 ```
 
-| 字段            | 必填 | 说明                                                            |
-| --------------- | ---- | --------------------------------------------------------------- |
-| `doi`           | 是   | DOI 或可解析的 DOI URL                                          |
-| `collectionKey` | 否   | 目标收藏夹的 key；省略时使用插件设置                            |
-| `findFullText`  | 否   | 是否查找全文，默认 `true`                                       |
-| `shortTitle`    | 否   | 非空字符串会覆盖 Short Title；省略或空字符串不改动              |
-| `methods`       | 否   | Zotero 常规全文解析方法的字符串数组；省略或空数组时使用默认顺序 |
+| 字段            | 必填 | 说明                                                                                                                                                         |
+| --------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `doi`           | 是   | DOI 或可解析的 DOI URL                                                                                                                                       |
+| `collectionKey` | 否   | 目标收藏夹的 key；省略时使用插件设置                                                                                                                         |
+| `findFullText`  | 否   | 是否查找全文，默认 `true`                                                                                                                                    |
+| `shortTitle`    | 否   | 非空字符串会覆盖 Short Title；省略或空字符串不改动                                                                                                           |
+| `methods`       | 否   | Zotero 常规全文解析方法的字符串数组；省略或空数组时使用默认顺序                                                                                              |
 | `pdfPath`       | 否   | 本机可读的 PDF 绝对路径；提供时文件会复制到 Zotero 附件存储，跳过网络查找，原文件保留。文件校验失败时返回错误。手动提供文件时，请确保 PDF 内容对应所填 DOI。 |
 
 响应示例（省略条目摘要等字段）：
@@ -158,7 +158,8 @@ Zotero-API-Key: <授权获得的 key>
 
 `itemKey` 必填，指向用户库中的文献条目；`methods` 可选，省略或空数组时使用
 Zotero 默认全文解析顺序。响应包含 `item` 和 `fullText`。
-Nature 和 PNAS 主刊也会尝试出版社备用下载；`methods` 仅控制常规解析器。
+Nature 和 PNAS 主刊也会尝试出版社备用下载；Cell 系列直接使用浏览器下载。
+`methods` 仅控制常规解析器，对 Cell 路线无效。
 
 ### 向已有条目导入本地 PDF
 
@@ -189,6 +190,7 @@ Nature 和 PNAS 主刊也会尝试出版社备用下载；`methods` 仅控制常
 - **当前收藏夹**：GET `/api/plus/selected-collection`，
   返回 `{"name": "我的集合", "key": "ABC12345"}`；
   未选中时返回 `No Collection selected.`。
+
 ---
 
 ## 开发
@@ -225,7 +227,9 @@ XPI 位于 `.scaffold/build/doi2pdf-v<version>.xpi`；版本也可从 `.scaffold
 对支持的 Nature 和 PNAS 主刊条目，常规获取提前失败或未找到 PDF 时立即启动
 备用路线；常规获取开始后 8 秒仍未成功时，也启动备用路线。
 8 秒等待发生在父条目确定后的全文阶段，不包含元数据查询时间。
-每个出版社备用任务的预算为 30 秒，不能将这两个数值视为整个 API 请求的耗时上限。
+Nature / PNAS 备用任务的预算为 30 秒。Cell 在父条目完成后直接下载，
+跳过通用 PDF 查找和 8 秒等待，浏览器任务预算为 60 秒。
+这些预算均不包含父条目元数据查询和附件入库时间，不能视为整个 API 请求的耗时上限。
 
 ### Nature 官网下载
 
@@ -249,6 +253,26 @@ Chrome 使用非零调试端口，不启用 headless，不修改网页中的浏�
 不同条目共用一个专用 profile，任务串行运行；30 秒预算包含排队、Chrome 启动和下载。
 PNAS Nexus 使用不同平台，本版本没有其出版社专用备用路线。
 
+### Cell 系列官网下载
+
+插件从父条目的 ISSN、期刊名称 / 别名和 Cell 官网路径匹配本地期刊名录，
+覆盖 65 种期刊和 107 个 ISSN。缺少 ISSN 且本地字段未匹配时，按完整 DOI
+查询 Crossref 元数据；DOI 的前缀、后缀和期刊缩写不参与 Cell 判断。
+
+PII 从条目 URL 或 Crossref 的出版社链接中提取，构造 cell.com 正文和 PDF 地址，
+不访问 Linking Hub 或 ScienceDirect 下载页面。匹配的元数据缺少 PII 时查询最多 5 秒，
+失败会保留父条目并返回下载诊断。
+同一任务复用 Crossref 查询结果；已经查询但未返回 PII 时不重复请求。
+
+Cell 使用与 PNAS 共用的持久化专用 Chrome profile，任务串行执行。
+浏览器保持有头模式，通过 CDP 显式最小化窗口和创建后台标签。
+启动参数无法保证完全隐藏启动窗口；下载过程中不使用 PDF 查看器或保存对话框。
+官网页面 DOI、期刊路径及 PII 通过校验后，直接读取浏览器已认证的 PDF 响应流，
+收到流结束信号并校验 PDF 文件头后，再复用附件导入流程。
+60 秒预算包含排队、PII 查询、浏览器启动和文件下载。
+
+本轮实际验证的下载文章为 iScience 和 Neuron，其他期刊仍取决于页面兼容性和访问权限。
+
 ### 下载诊断
 
 成功结果的 `fullText.source` 表示 PDF 来源：
@@ -259,25 +283,31 @@ PNAS Nexus 使用不同平台，本版本没有其出版社专用备用路线。
 | `native`   | Zotero 常规下载    |
 | `nature`   | Nature 官网下载    |
 | `pnas`     | PNAS 官网下载      |
+| `cell`     | Cell 系列官网下载  |
 | `local`    | 手动提供的本地 PDF |
 
-自动获取结果还包含 `attempts` 诊断。Nature 或 PNAS 下载成功时，
+自动获取结果还包含 `attempts` 诊断。Nature、PNAS 或 Cell 下载成功时，
 `fullText.timings` 提供 `articleMs`、`pdfMs` 和 `totalMs`，单位为毫秒；
-总时间包含启动、网页解析和文件校验，PNAS 还包含排队，不包含附件入库。
+总时间包含启动、网页解析和文件校验；浏览器路线还包含排队，不包含附件入库。
 
 下载异常时保留元数据，并通过 `fullText.message` 报告原因。
-Nature 或 PNAS 备用路线启动后，任务结束会在 Zotero 右下角显示 `doi2pdf` 提示：
+Nature、PNAS 或 Cell 官网路线启动后，任务结束会在 Zotero 右下角显示 `doi2pdf` 提示：
 绿色 `✔` 表示 PDF 已保存，红色 `❌` 表示失败，并显示文献名、DOI 和简短原因。
 成功提示约 3 秒后关闭，失败提示约 5 秒后关闭；点击结果文字可打开 DOI 页面。
 已有 PDF 或常规路线直接成功时，不额外显示备用路线提示。
 系统缺少 curl、Chrome 启动失败或 profile 被占用，都可能导致备用下载失败。
-PNAS 常见错误码：
+浏览器路线常见错误码：
 
-| 错误码                 | 含义                               |
-| ---------------------- | ---------------------------------- |
-| `CHROME_NOT_FOUND`     | 未找到已安装的 Google Chrome       |
-| `NEEDS_BROWSER_ACCESS` | 检测到网站验证页，且 30 秒内未完成 |
-| `PNAS_TIMEOUT`         | 其他 PNAS 备用任务超时             |
+| 错误码                 | 含义                           |
+| ---------------------- | ------------------------------ |
+| `CHROME_NOT_FOUND`     | 未找到已安装的 Google Chrome   |
+| `NEEDS_BROWSER_ACCESS` | 网站验证未在相应任务预算内完成 |
+| `PNAS_TIMEOUT`         | 其他 PNAS 备用任务超时         |
+| `CELL_TIMEOUT`         | Cell 浏览器任务超时            |
+| `PII_NOT_FOUND`        | 已识别 Cell，但没有文章 PII    |
+| `JOURNAL_MISMATCH`     | 期刊证据不一致                 |
+| `PII_MISMATCH`         | 出版社提供的文章标识不一致     |
+| `CELL_PDF_UNAVAILABLE` | Cell 返回 PDF 访问错误状态     |
 
 浏览器下载仍受网站验证和访问权限限制。超时会终止本次任务启动的 curl 或 Chrome 子进程。
 
@@ -292,7 +322,7 @@ PNAS 常见错误码：
   downloads/            各任务的独立暂存目录，完成或失败后清理
 ```
 
-常规下载、Nature curl 和 PNAS Chrome 都在 `downloads` 下使用独立的
+常规下载、Nature curl、PNAS 和 Cell Chrome 都在 `downloads` 下使用独立的
 `doi2pdf-*` 目录。任务只清理自己的暂存文件和临时 Cookie，不删除文献数据库、
 已有附件或 Chrome profile；profile 中的会话保留。
 

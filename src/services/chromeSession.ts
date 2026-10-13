@@ -1,7 +1,44 @@
-import { IdentifierError } from "./identifier";
+import { IdentifierError, normalizeDOI } from "./identifier";
 import { getPluginDataDirectory } from "./pdf";
 import { DownloadTask } from "./downloadTask";
 import { DownloadProcess, DownloadSubprocess, readOutput } from "./subprocess";
+import type { PDFCandidate } from "./pdf";
+
+// All publishers using chrome_profile share this queue and shutdown registry.
+let queue: Promise<unknown> = Promise.resolve();
+const cancellations = new Set<() => void>();
+
+/** Cancel plugin-owned browser work while preserving the persistent profile. */
+export function stopChromeDownloads(): void {
+  for (const cancel of cancellations) cancel();
+}
+
+/**
+ * Serialize downloads that own the same Chrome profile.
+ *
+ * Args:
+ *   task: Deadline already running while the operation waits in the queue.
+ *   operation: Download that releases its browser before resolving.
+ * Returns:
+ *   The staged PDF, or the task's cancellation error.
+ */
+export async function queueChromeDownload(
+  task: DownloadTask,
+  operation: () => Promise<PDFCandidate>,
+): Promise<PDFCandidate> {
+  const shutdown = () => task.cancel(new Error("Chrome download stopped"));
+  cancellations.add(shutdown);
+  const pending = queue.then(() => {
+    task.check();
+    return operation();
+  });
+  queue = pending.catch(() => undefined);
+  try {
+    return await task.run(pending);
+  } finally {
+    cancellations.delete(shutdown);
+  }
+}
 
 type ChromeClasses = Record<
   string,
@@ -68,7 +105,7 @@ async function findChrome(subprocess: DownloadSubprocess): Promise<string> {
   }
   throw new IdentifierError(
     "CHROME_NOT_FOUND",
-    "PNAS fallback requires installed Google Chrome",
+    "Publisher PDF download requires installed Google Chrome",
   );
 }
 
@@ -76,6 +113,7 @@ async function findChrome(subprocess: DownloadSubprocess): Promise<string> {
 export interface ChromeEvent {
   method: string;
   params: any;
+  sessionId?: string;
 }
 
 /** Own Chrome startup, CDP requests, and teardown for a download task. */
@@ -94,6 +132,8 @@ export class ChromeSession {
     }
   >();
   exited = false;
+  /** Whether the most recently observed publisher page requires verification. */
+  challenge = false;
 
   /**
    * Bind the session to the caller's deadline and cancellation.
@@ -133,10 +173,12 @@ export class ChromeSession {
    * Args:
    *   directory: Private task directory for Chrome's temporary files.
    *   onEvent: Publisher callback for CDP events, excluding command replies.
+   *   minimized: Keep the owned browser in the taskbar without headless mode.
    */
   async start(
     directory: nsIFile,
     onEvent: (event: ChromeEvent) => void,
+    minimized = false,
   ): Promise<void> {
     const win = this.win;
     const { Subprocess } = win.ChromeUtils.importESModule(
@@ -154,6 +196,7 @@ export class ChromeSession {
     this.child = await Subprocess.call({
       command: executable,
       arguments: [
+        ...(minimized ? ["--start-minimized"] : []),
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=" + port,
         // System-principal Gecko windows may send the opaque origin "null".
@@ -230,6 +273,131 @@ export class ChromeSession {
         if (!this.closing) this.task.cancel(error);
       };
     });
+    if (minimized) {
+      // The launch flag alone is insufficient on some Chrome installations.
+      const { targetInfos } = await this.command("Target.getTargets");
+      const page = targetInfos.find(
+        (target: { type: string }) => target.type === "page",
+      );
+      if (!page) throw new Error("Chrome has no window to minimize");
+      await this.minimize(page.targetId);
+    }
+  }
+
+  /**
+   * Minimize a page's owned Chrome window without changing its geometry.
+   *
+   * Args:
+   *   targetId: Page belonging to this dedicated browser.
+   */
+  async minimize(targetId: string): Promise<void> {
+    const { windowId } = await this.command("Browser.getWindowForTarget", {
+      targetId,
+    });
+    await this.command("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "minimized" },
+    });
+  }
+
+  /**
+   * Wait for article metadata and verify its DOI before PDF navigation.
+   *
+   * Args:
+   *   sessionId: Owned article page session, without a paused PDF response.
+   *   doi: Normalized parent DOI.
+   *   publisher: Name included in identity failure diagnostics.
+   * Returns:
+   *   Article DOI, current URL and optional advertised PDF URL.
+   */
+  async readArticle(
+    sessionId: string,
+    doi: string,
+    publisher: string,
+  ): Promise<{
+    doi: string;
+    url: string;
+    pdf?: string;
+  }> {
+    while (true) {
+      this.task.check();
+      if (this.exited)
+        throw new Error("Dedicated Chrome exited while reading the article");
+      const response = await this.command(
+        "Runtime.evaluate",
+        {
+          expression:
+            "({doi:document.querySelector('meta[name=citation_doi]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})",
+          returnByValue: true,
+        },
+        sessionId,
+      );
+      const page = response.result?.value;
+      this.challenge = /just a moment|请稍候|security verification/i.test(
+        page?.title || "",
+      );
+      if (page?.doi) {
+        if (normalizeDOI(page.doi) !== doi)
+          throw new IdentifierError(
+            "DOI_MISMATCH",
+            `${publisher} page DOI does not match the parent item`,
+          );
+        return page;
+      }
+      await new Promise((resolve) => this.win.setTimeout(resolve, 250));
+    }
+  }
+
+  /**
+   * Save a paused response to EOF, then release its stream and navigation.
+   *
+   * Args:
+   *   sessionId: Owned page session containing the response.
+   *   requestId: Fetch response request to consume.
+   *   path: Private task file; the caller owns validation and cleanup.
+   */
+  async saveResponseBody(
+    sessionId: string,
+    requestId: string,
+    path: string,
+  ): Promise<void> {
+    const win = this.win;
+    const { stream } = await this.command(
+      "Fetch.takeResponseBodyAsStream",
+      { requestId },
+      sessionId,
+    );
+    let written = 0;
+    try {
+      while (true) {
+        const chunk = await this.command(
+          "IO.read",
+          { handle: stream, size: 262144 },
+          sessionId,
+        );
+        this.task.check();
+        const bytes = chunk.base64Encoded
+          ? Uint8Array.from(win.atob(chunk.data), (character) =>
+              character.charCodeAt(0),
+            )
+          : new win.TextEncoder().encode(chunk.data);
+        await win.IOUtils.write(path, bytes, {
+          mode: written ? "append" : "overwrite",
+        });
+        written += bytes.length;
+        if (chunk.eof) break;
+      }
+    } finally {
+      await this.command("IO.close", { handle: stream }, sessionId).catch(
+        () => undefined,
+      );
+      // A consumed response cannot continue unchanged; release its navigation.
+      await this.command(
+        "Fetch.failRequest",
+        { requestId, errorReason: "Aborted" },
+        sessionId,
+      ).catch(() => undefined);
+    }
   }
 
   /**
