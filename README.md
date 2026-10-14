@@ -43,6 +43,11 @@ PNAS 和 Cell 官网下载需要已安装 Google Chrome。Cell 使用最小化�
 - 启用 Zotero 本地 API：在 `设置 > 高级` 中打开API，一般是 `http://localhost:23119`
 - 在 Zotero 设置的 doi2pdf 页面填写目标收藏夹，默认是 `doi2pdf`。
   填写 `父级/子级` 可保存到嵌套收藏夹；不存在的收藏夹会在首次使用时创建。
+- Chrome 可执行文件路径默认留空，插件会自动查找。Windows 先检查注册表中的
+  `App Paths\chrome.exe`，再检查 Program Files、Program Files (x86) 和当前用户
+  LocalAppData 下的 `Google\Chrome\Application\chrome.exe`。
+  自定义安装或便携版可填写 `chrome.exe` 的完整路径，PNAS 和 Cell 共用此设置。
+  填写的路径无效时返回 `CHROME_NOT_FOUND`；清空即可恢复自动查找，下次下载时生效。
 
 ### 3. 添加 DOI 并下载 PDF
 
