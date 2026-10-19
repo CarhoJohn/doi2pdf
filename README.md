@@ -216,6 +216,22 @@ npm run build
 XPI 位于 `.scaffold/build/doi2pdf-v<version>.xpi`；版本也可从 `.scaffold/build/addon/manifest.json` 确认。
 按上面的[安装步骤](#安装)安装 XPI，安装前关闭正在运行的开发实例或旧的开发安装。
 
+依赖通过 npm 别名隔离：`@typescript/native` 提供 TypeScript 7 的 `tsc`，
+`typescript` 指向 `@typescript/typescript6`，为 ESLint 提供兼容的编译器 API。
+不要将这两个别名直接替换为单一的 TypeScript 7 依赖。
+
+PDF 流程的单元测试使用 Node.js 内置测试运行器和内存中的 Zotero、文件、网络替身，
+不访问真实文献库，不需要启动 Zotero 或 Chrome：
+
+```bash
+npm ci
+npm run test:unit
+```
+
+CI 会独立运行这组测试。Git 仅收录 `test/pdf.unit.test.mjs`；`test/` 下的浏览器
+profile、Cookie、PDF、日志和实测产物继续忽略。增加测试文件时应在 `.gitignore`
+中逐个开放，避免将本地运行数据提交到仓库。测试文件不会打包进 XPI。
+
 ## 原理与实现细节
 
 ### 文献创建与 PDF 获取
