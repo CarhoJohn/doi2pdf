@@ -3,6 +3,7 @@ import { getPluginDataDirectory } from "./pdf";
 import { DownloadTask } from "./downloadTask";
 import { DownloadProcess, DownloadSubprocess, readOutput } from "./subprocess";
 import type { PDFCandidate } from "./pdf";
+import { getPref } from "../utils/prefs";
 
 // All publishers using chrome_profile share this queue and shutdown registry.
 let queue: Promise<unknown> = Promise.resolve();
@@ -46,7 +47,7 @@ type ChromeClasses = Record<
 >;
 
 /**
- * Locate installed Chrome without a shell or using the user's profile.
+ * Use the configured Chrome executable, or locate an installation automatically.
  *
  * Args:
  *   subprocess: Gecko's native process launcher.
@@ -54,6 +55,22 @@ type ChromeClasses = Record<
  *   The executable's absolute path, or a CHROME_NOT_FOUND error.
  */
 async function findChrome(subprocess: DownloadSubprocess): Promise<string> {
+  // Honor explicit settings before discovery, including quoted Windows paths.
+  const configured = (getPref("chromePath") ?? "")
+    .trim()
+    .replace(/^"(.*)"$/, "$1");
+  if (configured) {
+    try {
+      const file = Zotero.File.pathToFile(configured);
+      if (file.exists() && file.isFile()) return file.path;
+    } catch {
+      // Invalid or inaccessible paths receive the same actionable diagnostic.
+    }
+    throw new IdentifierError(
+      "CHROME_NOT_FOUND",
+      `Configured Google Chrome executable was not found or is not a file: ${configured}`,
+    );
+  }
   const win = Zotero.getMainWindow();
   if (Zotero.isWin) {
     // App Paths covers user-selected installation locations as well as defaults.

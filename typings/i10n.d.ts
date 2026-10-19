@@ -13,6 +13,8 @@ export type FluentMessageId =
   | 'menuitem-label'
   | 'menuitem-submenulabel'
   | 'menupopup-label'
+  | 'pref-chrome-help'
+  | 'pref-chrome-path'
   | 'pref-collection-help'
   | 'pref-collection-name'
   | 'pref-help'

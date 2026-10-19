@@ -43,6 +43,13 @@ export default defineConfig({
     ],
   },
 
+  release: {
+    bumpp: {
+      // The changelog generator excludes the version commit using this template.
+      commit: "chore(publish): release v%s",
+    },
+  },
+
   test: {
     waitForPlugin: `() => Zotero.${pkg.config.addonInstance}.data.initialized`,
   },

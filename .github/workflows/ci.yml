@@ -34,6 +34,19 @@ jobs:
           name: build-result
           path: .scaffold/build
 
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup JS
+        uses: zotero-plugin-dev/workflows/setup-js@main
+        with:
+          auto-install: false
+      - name: Install locked dependencies
+        run: npm ci
+      # File, network and Zotero doubles keep this suite independent of a live library.
+      - name: Run unit tests
+        run: npm run test:unit
+
   test:
     runs-on: ubuntu-latest
     needs:

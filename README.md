@@ -43,6 +43,11 @@ PNAS 和 Cell 官网下载需要已安装 Google Chrome。Cell 使用最小化�
 - 启用 Zotero 本地 API：在 `设置 > 高级` 中打开API，一般是 `http://localhost:23119`
 - 在 Zotero 设置的 doi2pdf 页面填写目标收藏夹，默认是 `doi2pdf`。
   填写 `父级/子级` 可保存到嵌套收藏夹；不存在的收藏夹会在首次使用时创建。
+- Chrome 可执行文件路径默认留空，插件会自动查找。Windows 先检查注册表中的
+  `App Paths\chrome.exe`，再检查 Program Files、Program Files (x86) 和当前用户
+  LocalAppData 下的 `Google\Chrome\Application\chrome.exe`。
+  自定义安装或便携版可填写 `chrome.exe` 的完整路径，PNAS 和 Cell 共用此设置。
+  填写的路径无效时返回 `CHROME_NOT_FOUND`；清空即可恢复自动查找，下次下载时生效。
 
 ### 3. 添加 DOI 并下载 PDF
 
@@ -210,6 +215,22 @@ npm run build
 
 XPI 位于 `.scaffold/build/doi2pdf-v<version>.xpi`；版本也可从 `.scaffold/build/addon/manifest.json` 确认。
 按上面的[安装步骤](#安装)安装 XPI，安装前关闭正在运行的开发实例或旧的开发安装。
+
+依赖通过 npm 别名隔离：`@typescript/native` 提供 TypeScript 7 的 `tsc`，
+`typescript` 指向 `@typescript/typescript6`，为 ESLint 提供兼容的编译器 API。
+不要将这两个别名直接替换为单一的 TypeScript 7 依赖。
+
+PDF 流程的单元测试使用 Node.js 内置测试运行器和内存中的 Zotero、文件、网络替身，
+不访问真实文献库，不需要启动 Zotero 或 Chrome：
+
+```bash
+npm ci
+npm run test:unit
+```
+
+CI 会独立运行这组测试。Git 仅收录 `test/pdf.unit.test.mjs`；`test/` 下的浏览器
+profile、Cookie、PDF、日志和实测产物继续忽略。增加测试文件时应在 `.gitignore`
+中逐个开放，避免将本地运行数据提交到仓库。测试文件不会打包进 XPI。
 
 ## 原理与实现细节
 

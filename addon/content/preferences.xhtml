@@ -17,6 +17,24 @@
     ></html:input>
   </hbox>
   <description data-l10n-id="pref-collection-help"></description>
+  <!-- Bind the optional executable override to Zotero's preference storage. -->
+  <hbox>
+    <html:label
+      for="zotero-prefpane-__addonRef__-chrome-path"
+      data-l10n-id="pref-chrome-path"
+    ></html:label>
+    <html:input
+      type="text"
+      id="zotero-prefpane-__addonRef__-chrome-path"
+      preference="chromePath"
+      aria-describedby="zotero-prefpane-__addonRef__-chrome-help"
+      flex="1"
+    ></html:input>
+  </hbox>
+  <description
+    id="zotero-prefpane-__addonRef__-chrome-help"
+    data-l10n-id="pref-chrome-help"
+  ></description>
 </groupbox>
 <vbox>
   <html:label
