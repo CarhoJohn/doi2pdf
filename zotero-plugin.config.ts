@@ -48,6 +48,34 @@ export default defineConfig({
       // The changelog generator excludes the version commit using this template.
       commit: "chore(publish): release v%s",
     },
+    github: {
+      /**
+       * Normalize historical aliases in the generated contributor list.
+       *
+       * Args:
+       *   ctx: Scaffold context containing the generated changelog.
+       *
+       * Returns:
+       *   Release notes with deduplicated canonical contributor names.
+       */
+      releaseNote(ctx) {
+        const heading = "### ❤️ Contributors";
+        const [notes, contributors] = ctx.release.changelog.split(heading);
+        if (!contributors) return ctx.release.changelog;
+
+        // Scaffold reads raw Git names, so .mailmap alone cannot merge aliases.
+        const authors = contributors
+          .trim()
+          .split("\n")
+          .map((line) =>
+            line.replace(
+              /^- (?:Carho|CarhoJohn|JiangJiahao)(?:\s.*)?$/,
+              "- Carho",
+            ),
+          );
+        return `${notes}${heading}\n\n${[...new Set(authors)].join("\n")}`;
+      },
+    },
   },
 
   test: {
