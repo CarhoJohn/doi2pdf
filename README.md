@@ -22,6 +22,7 @@ doi2pdf 通过 Zotero 本地 API
 
 - **自动下载 PDF**：添加 DOI 时默认查找全文，并保存为 Zotero 附件；也可以为已有条目补充 PDF。
 - **补充出版社下载路线**：Nature 系列和 PNAS 主刊支持官网备用下载；Cell 系列识别后直接使用官网浏览器下载，支持先保存父条目再导入 PDF。
+- **Annual Reviews API 导入与网页下载**：按完整 DOI 查询 Crossref，以返回的出版社字段识别 Annual Reviews 并创建元数据；通过 Chrome 提交 PDF 下载表单，跳过 Zotero identifier 和通用全文查找。
 - **减少重复导入**：按 DOI 复用已有条目，已有可访问的 PDF 时直接复用附件。
 - **指定保存位置**：在插件设置中选择默认收藏夹，支持 `父级/子级` 路径；也可在请求中指定收藏夹。
 - **导入本地 PDF**：将本机已有文件复制为附件，保留原文件。
@@ -29,7 +30,7 @@ doi2pdf 通过 Zotero 本地 API
 简单来说，插件先通过 Zotero 获取文献信息，再尝试下载全文；找不到 PDF 时仍保留
 文献条目。下载依赖当前网络的开放获取或机构访问权限。
 
-PNAS 和 Cell 官网下载需要已安装 Google Chrome。Cell 使用最小化的专用窗口，启动瞬间仍可能短暂显示。
+PNAS、Cell 和 Annual Reviews 官网下载需要已安装 Google Chrome。Cell 和 Annual Reviews 使用最小化的专用窗口，启动瞬间仍可能短暂显示。
 
 ## 快速使用
 
@@ -236,7 +237,11 @@ profile、Cookie、PDF、日志和实测产物继续忽略。增加测试文件�
 
 ### 文献创建与 PDF 获取
 
-`add-doi` 使用 Zotero 内置标识符翻译器保存或复用元数据，再单独获取 PDF。
+`add-doi` 默认使用 Zotero 内置标识符翻译器保存或复用元数据，再单独获取 PDF。
+创建新父条目前先查询 Crossref，核验完整 DOI 和返回的出版社信息。
+确认属于 Annual Reviews 时直接保存 API 元数据，不调用 identifier 翻译器；
+不使用 DOI 数字前缀、网页正文期刊名称或逐刊规则识别。
+Crossref 未能识别为 Annual Reviews 时保留现有 identifier 流程；元数据冲突会报错。
 并发的同一 DOI 导入共享元数据创建任务，同一条目的
 全文请求也共享下载任务。已有可访问的 PDF 直接复用；网页快照和丢失的文件不算成功。
 
@@ -250,6 +255,8 @@ profile、Cookie、PDF、日志和实测产物继续忽略。增加测试文件�
 8 秒等待发生在父条目确定后的全文阶段，不包含元数据查询时间。
 Nature / PNAS 备用任务的预算为 30 秒。Cell 在父条目完成后直接下载，
 跳过通用 PDF 查找和 8 秒等待，浏览器任务预算为 60 秒。
+Crossref 请求最多等待 5 秒；Cell 与 Annual Reviews 复用同一查询结果（缓存 5 分钟，最多 64 条）。
+Annual Reviews 的 PDF 浏览器任务有 60 秒预算，包含共享 profile 排队及浏览器启动。
 这些预算均不包含父条目元数据查询和附件入库时间，不能视为整个 API 请求的耗时上限。
 
 ### Nature 官网下载
@@ -296,42 +303,62 @@ Cell 使用与 PNAS 共用的持久化专用 Chrome profile，任务串行执行
 
 本轮实际验证的下载文章为 iScience 和 Neuron，其他期刊仍取决于页面兼容性和访问权限。
 
+### Annual Reviews API 元数据与网页 PDF 下载
+
+网页 PDF 按钮的 `href="#"` 不是下载地址。插件读取按钮所在的 POST 表单，
+在浏览器中提交 `/deliver/fulltext/<DOI>/<文章名>.pdf`，由网站跳转到带有效期的
+`/docserver/fulltext/...pdf?expires=...&checksum=...` 地址。
+
+插件与 PNAS、Cell 共用 `<Zotero 数据目录>/doi2pdf/chrome_profile`，串行使用有头、
+最小化 Chrome。页面 DOI、表单方法及目标文章路径验证通过后，
+在同一标签页提交实际表单，保留隐藏字段和浏览器认证状态；CDP 在 PDF 查看器接管前
+读取原始响应流至 EOF，再校验 PDF 文件头并通过公共附件流程入库。
+不持久化签名 URL，附件记录稳定的文章网页地址。
+
+作者、期刊、ISSN、日期和摘要均来自 Crossref；API 未提供的卷期页码留空。
+已有同 DOI 条目和可用 PDF 会被复用；`findFullText: false` 只创建或复用元数据，
+显式 `pdfPath` 只跳过网页 PDF 下载，新父条目的元数据仍从 API 读取。
+元数据核验失败时不创建占位条目；PDF 下载失败时保留已保存的父条目并返回诊断。
+
 ### 下载诊断
 
 成功结果的 `fullText.source` 表示 PDF 来源：
 
-| 来源       | 含义               |
-| ---------- | ------------------ |
-| `existing` | 已有附件           |
-| `native`   | Zotero 常规下载    |
-| `nature`   | Nature 官网下载    |
-| `pnas`     | PNAS 官网下载      |
-| `cell`     | Cell 系列官网下载  |
-| `local`    | 手动提供的本地 PDF |
+| 来源            | 含义                    |
+| --------------- | ----------------------- |
+| `existing`      | 已有附件                |
+| `native`        | Zotero 常规下载         |
+| `nature`        | Nature 官网下载         |
+| `pnas`          | PNAS 官网下载           |
+| `cell`          | Cell 系列官网下载       |
+| `annualreviews` | Annual Reviews 网页下载 |
+| `local`         | 手动提供的本地 PDF      |
 
-自动获取结果还包含 `attempts` 诊断。Nature、PNAS 或 Cell 下载成功时，
+自动获取结果还包含 `attempts` 诊断。Nature、PNAS、Cell 或 Annual Reviews 下载成功时，
 `fullText.timings` 提供 `articleMs`、`pdfMs` 和 `totalMs`，单位为毫秒；
 总时间包含启动、网页解析和文件校验；浏览器路线还包含排队，不包含附件入库。
 
 下载异常时保留元数据，并通过 `fullText.message` 报告原因。
-Nature、PNAS 或 Cell 官网路线启动后，任务结束会在 Zotero 右下角显示 `doi2pdf` 提示：
+Nature、PNAS、Cell 或 Annual Reviews 官网路线启动后，任务结束会在 Zotero 右下角显示 `doi2pdf` 提示：
 绿色 `✔` 表示 PDF 已保存，红色 `❌` 表示失败，并显示文献名、DOI 和简短原因。
 成功提示约 3 秒后关闭，失败提示约 5 秒后关闭；点击结果文字可打开 DOI 页面。
 已有 PDF 或常规路线直接成功时，不额外显示备用路线提示。
 系统缺少 curl、Chrome 启动失败或 profile 被占用，都可能导致备用下载失败。
 浏览器路线常见错误码：
 
-| 错误码                 | 含义                           |
-| ---------------------- | ------------------------------ |
-| `CHROME_NOT_FOUND`     | 未找到已安装的 Google Chrome   |
-| `NEEDS_BROWSER_ACCESS` | 网站验证未在相应任务预算内完成 |
-| `PNAS_TIMEOUT`         | 其他 PNAS 备用任务超时         |
-| `PNAS_PDF_UNAVAILABLE` | PNAS 返回 PDF 访问错误状态     |
-| `CELL_TIMEOUT`         | Cell 浏览器任务超时            |
-| `PII_NOT_FOUND`        | 已识别 Cell，但没有文章 PII    |
-| `JOURNAL_MISMATCH`     | 期刊证据不一致                 |
-| `PII_MISMATCH`         | 出版社提供的文章标识不一致     |
-| `CELL_PDF_UNAVAILABLE` | Cell 返回 PDF 访问错误状态     |
+| 错误码                          | 含义                              |
+| ------------------------------- | --------------------------------- |
+| `CHROME_NOT_FOUND`              | 未找到已安装的 Google Chrome      |
+| `NEEDS_BROWSER_ACCESS`          | 网站验证未在相应任务预算内完成    |
+| `PNAS_TIMEOUT`                  | 其他 PNAS 备用任务超时            |
+| `PNAS_PDF_UNAVAILABLE`          | PNAS 返回 PDF 访问错误状态        |
+| `CELL_TIMEOUT`                  | Cell 浏览器任务超时               |
+| `PII_NOT_FOUND`                 | 已识别 Cell，但没有文章 PII       |
+| `JOURNAL_MISMATCH`              | 期刊证据不一致                    |
+| `PII_MISMATCH`                  | 出版社提供的文章标识不一致        |
+| `CELL_PDF_UNAVAILABLE`          | Cell 返回 PDF 访问错误状态        |
+| `ANNUALREVIEWS_TIMEOUT`         | Annual Reviews PDF 浏览器任务超时 |
+| `ANNUALREVIEWS_PDF_UNAVAILABLE` | 缺少 PDF 表单或网站拒绝 PDF 访问  |
 
 浏览器下载仍受网站验证和访问权限限制。超时会终止本次任务启动的 curl 或 Chrome 子进程。
 

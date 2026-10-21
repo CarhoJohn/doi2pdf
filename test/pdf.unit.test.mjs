@@ -17,6 +17,8 @@ const bundle = buildSync({
       export * from './src/services/chromeSession';
       export * from './src/services/cellMetadata';
       export * from './src/services/cellPDF';
+      export * from './src/services/annualReviewsPDF';
+      export * from './src/services/crossref';
       export * from './src/endpoints/importPDF';
       export * from './src/endpoints/addDOI';`,
     resolveDir: process.cwd(),
@@ -31,6 +33,22 @@ const PDF = "%PDF-1.4\nfixture";
 const PNAS_DOI = "10.1073/pnas.2515233123";
 const CELL_DOI = "10.1016/j.isci.2026.117391";
 const CELL_PII = "S2589-0042(26)02769-0";
+const ANNUAL_DOI = "10.1146/annurev-psych-032526-071359";
+const ANNUAL_URL =
+  "https://www.annualreviews.org/content/journals/" + ANNUAL_DOI;
+const ANNUAL_PDF = `https://www.annualreviews.org/docserver/fulltext/${ANNUAL_DOI}/${ANNUAL_DOI.split("/")[1]}.pdf?expires=123&checksum=fixture`;
+const ANNUAL_METADATA = {
+  DOI: ANNUAL_DOI,
+  publisher: "Annual Reviews",
+  resource: { primary: { URL: ANNUAL_URL } },
+  title: ["Understanding Understanding"],
+  "container-title": ["Annual Review of Psychology"],
+  author: [{ given: "Timothy T.", family: "Rogers" }],
+  ISSN: ["0066-4308", "1545-2085"],
+  abstract: "<jats:p>Semantic knowledge review.</jats:p>",
+  issued: { "date-parts": [[2026, 10, 2]] },
+  language: "en",
+};
 const CELL_URL = "https://www.cell.com/iscience/fulltext/" + CELL_PII;
 const CELL_FIELDS = {
   ISSN: "2589-0042",
@@ -121,6 +139,12 @@ function fixture(options = {}) {
       isAttachment: () => false,
       isNote: () => false,
       addToCollection() {},
+      setCollections(value) {
+        this.collections = value;
+      },
+      setCreators(value) {
+        this.creators = value;
+      },
       saveTx: async () => {},
     };
     items.set(item.id, item);
@@ -233,12 +257,27 @@ function fixture(options = {}) {
           : undefined,
     },
     Libraries: { userLibraryID: 1 },
+    Collections: { getByLibraryAndKey: () => ({ id: 99 }) },
+    Item: class {
+      constructor() {
+        return parent();
+      }
+    },
     DataDirectory: { dir: "/data" },
     HTTP: {
       request: async (method, url) => {
         if (url.startsWith("https://api.crossref.org/")) {
           stats.metadataRequests ??= [];
           stats.metadataRequests.push(url);
+          if (url.endsWith(encodeURIComponent(ANNUAL_DOI))) {
+            if (options.annualMetadataFailure)
+              throw new Error("Crossref unavailable");
+            return {
+              responseText: JSON.stringify({
+                message: options.annualCrossref ?? ANNUAL_METADATA,
+              }),
+            };
+          }
           if (!options.crossref) throw new Error("Metadata unavailable");
           return {
             responseText: JSON.stringify({ message: options.crossref }),
@@ -326,11 +365,60 @@ function fixture(options = {}) {
                         url: "https://www.pnas.org/doi/" + this.doi,
                       };
             result = { result: { value } };
+            if (this.annualreviews && !options.chromeChallenge) {
+              result = {
+                result: {
+                  value: request.params.expression.includes("const form =")
+                    ? {
+                        url: options.annualFinalURL ?? ANNUAL_URL,
+                        ready:
+                          (this.annualReads = (this.annualReads || 0) + 1) <=
+                          (options.annualLoadingReads || 0)
+                            ? "loading"
+                            : "complete",
+                        formAction: options.annualFormMissing
+                          ? undefined
+                          : (options.annualFormAction ??
+                            ANNUAL_PDF.replace("/docserver/", "/deliver/")),
+                        formMethod: "post",
+                      }
+                    : {
+                        doi: options.annualPageDOI ?? ANNUAL_DOI,
+                        url: ANNUAL_URL,
+                      },
+                },
+              };
+              if (
+                request.params.expression.includes("form.requestSubmit()") &&
+                !options.chromeHangPDF
+              ) {
+                setTimeout(
+                  () =>
+                    this.onmessage?.({
+                      data: JSON.stringify({
+                        method: "Fetch.requestPaused",
+                        sessionId: "session",
+                        params: {
+                          requestId: "pdf-response",
+                          request: { url: options.annualPDFURL ?? ANNUAL_PDF },
+                          responseStatusCode: options.annualStatus ?? 200,
+                          responseHeaders: [
+                            { name: "Content-Type", value: "application/pdf" },
+                          ],
+                        },
+                      }),
+                    }),
+                  0,
+                );
+              }
+            }
           }
           if (request.method === "Page.navigate") {
             const url = request.params.url;
             let pdfNavigation = false;
-            if (url.includes("cell.com/")) {
+            if (url.includes("annualreviews.org/")) {
+              this.annualreviews = true;
+            } else if (url.includes("cell.com/")) {
               this.cell = true;
               pdfNavigation = url.includes("/action/showPdf");
             } else if (!url.includes("/pdf/")) this.doi = url.split("/doi/")[1];
@@ -433,6 +521,28 @@ function fixture(options = {}) {
     }),
     getTempDirectory: () => file("/temp"),
     Utilities: {
+      Item: {
+        // Model the native CSL API; assertions below also verify the supplied CSL record.
+        itemFromCSLJSON(item, csl) {
+          stats.csl = csl;
+          Object.assign(item.fields, {
+            DOI: csl.DOI,
+            title: csl.title,
+            publicationTitle: csl["container-title"],
+            url: csl.URL,
+            abstractNote: csl.abstract,
+            ISSN: csl.ISSN,
+          });
+          item.setCreators(
+            (csl.author || []).map((author) => ({
+              firstName: author.given || "",
+              lastName: author.family || author.literal,
+              creatorType: "author",
+            })),
+          );
+        },
+      },
+      cleanTags: (value) => value.replace(/<[^>]*>/g, ""),
       randomString: () => String(++random),
       extractIdentifiers: (value) => [{ DOI: value }],
     },
@@ -1263,7 +1373,8 @@ test("Cell add-doi saves the parent first then streams a minimized PDF without n
   assert.equal(f.stats.imports, 1);
   assert.equal(f.stats.chrome, 1);
   assert.ok(!f.stats.timers.includes(8000));
-  assert.equal(f.stats.metadataRequests?.length || 0, 0);
+  // Ingestion now checks Crossref publisher metadata before identifier creation.
+  assert.equal(f.stats.metadataRequests.length, 1);
   assert.ok(f.stats.timers.includes(60000));
   assert.ok(f.stats.chromeArguments.includes("--start-minimized"));
   assert.ok(
@@ -1397,7 +1508,7 @@ test("unknown Elsevier journal uses native retrieval despite a Cell-like DOI", a
   const result = await f.api.findFullText(item);
   assert.equal(result.source, "native");
   assert.equal(f.stats.chrome, 0);
-  assert.equal(f.stats.metadataRequests?.length || 0, 0);
+  assert.equal(f.stats.metadataRequests.length, 1);
 });
 
 test("an incomplete parent with conflicting Crossref identity cannot fall through to native import", async () => {
@@ -1622,6 +1733,193 @@ test("a late PNAS stream write is cleaned after deadline cancellation", async ()
       path.startsWith("/data/doi2pdf/downloads/"),
     ),
   );
+});
+
+test("Annual Reviews bypasses identifier and native retrieval, deduplicating parents and PDFs", async () => {
+  const f = fixture({ timerDivisor: 50, annualLoadingReads: 2 });
+  const req = { data: { doi: ANNUAL_DOI, collectionKey: "TEST" } };
+  const responses = await Promise.all([
+    new f.api.AddDOIEndpoint().run(req),
+    new f.api.AddDOIEndpoint().run(req),
+  ]);
+  for (const response of responses) {
+    assert.equal(response[0], 200);
+    const body = JSON.parse(response[2]);
+    assert.equal(body.fullText.status, "found");
+    assert.equal(body.fullText.source, "annualreviews");
+  }
+  assert.equal(f.stats.translations, 0);
+  assert.equal(f.stats.native, 0);
+  assert.equal(f.stats.metadataRequests.length, 1);
+  assert.equal(f.stats.imports, 1);
+  assert.equal(f.stats.chrome, 1);
+  assert.equal(f.stats.maxChrome, 1);
+  assert.ok(!f.stats.timers.includes(8000));
+  const item = [...f.items.values()].find((x) => x.isRegularItem?.());
+  assert.deepEqual([...item.collections], [99]);
+  assert.equal(item.fields.publicationTitle, "Annual Review of Psychology");
+  assert.equal(item.fields.url, ANNUAL_URL);
+  assert.equal(item.fields.pages, undefined);
+  assert.equal(item.fields.abstractNote, "Semantic knowledge review.");
+  assert.equal(item.fields.ISSN, "0066-4308 1545-2085");
+  assert.equal(f.stats.csl.type, "article-journal");
+  assert.deepEqual([...f.stats.csl.issued["date-parts"][0]], [2026, 10, 2]);
+  assert.equal(item.creators[0].lastName, "Rogers");
+  assert.ok(
+    f.stats.cdp.some((x) =>
+      x.params?.expression?.includes("form.requestSubmit()"),
+    ),
+  );
+  const repeat = JSON.parse((await new f.api.AddDOIEndpoint().run(req))[2]);
+  assert.equal(repeat.created, false);
+  assert.equal(repeat.fullText.source, "existing");
+  assert.equal(f.stats.chrome, 1);
+  assert.equal(f.stats.activeChrome, 0);
+  assert.ok(
+    ![...f.files.keys()].some((p) => p.startsWith("/data/doi2pdf/downloads/")),
+  );
+});
+
+test("Annual Reviews metadata-only and local PDF requests skip the browser PDF form", async () => {
+  for (const extra of [{ findFullText: false }, { pdfPath: "/input.pdf" }]) {
+    const f = fixture({ timerDivisor: 50 });
+    const response = await new f.api.AddDOIEndpoint().run({
+      data: { doi: ANNUAL_DOI, collectionKey: null, ...extra },
+    });
+    assert.equal(response[0], 200);
+    const body = JSON.parse(response[2]);
+    assert.equal(body.fullText.status, extra.pdfPath ? "found" : "skipped");
+    assert.equal(f.stats.chrome, 0);
+    assert.equal(f.stats.translations, 0);
+    assert.equal(f.stats.native, 0);
+    assert.ok(
+      !(f.stats.cdp || []).some((x) =>
+        x.params?.expression?.includes("form.requestSubmit()"),
+      ),
+    );
+  }
+});
+
+test("Annual Reviews identification uses API publisher metadata, never DOI prefixes or webpage journal labels", async () => {
+  const otherDOI = "10.9999/shared-prefix-example";
+  const f = fixture({ crossref: { ...ANNUAL_METADATA, DOI: otherDOI } });
+  assert.equal(
+    (await f.api.lookupAnnualReviewsMetadata(otherDOI)).publisher,
+    "Annual Reviews",
+  );
+  const other = fixture({
+    annualCrossref: { ...ANNUAL_METADATA, publisher: "Other Publisher" },
+  });
+  const response = await new other.api.AddDOIEndpoint().run({
+    data: { doi: ANNUAL_DOI, collectionKey: null, findFullText: false },
+  });
+  assert.equal(response[0], 200);
+  assert.equal(other.stats.translations, 1);
+  assert.equal(other.stats.chrome, 0);
+  const unavailable = fixture({ annualMetadataFailure: true });
+  assert.equal(
+    await unavailable.api.lookupAnnualReviewsMetadata(ANNUAL_DOI),
+    undefined,
+  );
+  const item = other.parent(ANNUAL_DOI);
+  Object.assign(item.fields, {
+    publicationTitle: "Annual Review of Psychology",
+    url: ANNUAL_URL,
+    ISSN: "0066-4308",
+  });
+  assert.equal((await other.api.findFullText(item)).source, "native");
+  assert.equal(other.stats.chrome, 0);
+});
+
+test("Annual Reviews validates metadata before saving a parent", async () => {
+  for (const [options, code] of [
+    [
+      { annualCrossref: { ...ANNUAL_METADATA, DOI: "10.9999/wrong" } },
+      "DOI_MISMATCH",
+    ],
+    [{ annualCrossref: { ...ANNUAL_METADATA, title: [] } }, "LOOKUP_FAILED"],
+    [
+      { annualCrossref: { ...ANNUAL_METADATA, "container-title": [] } },
+      "LOOKUP_FAILED",
+    ],
+  ]) {
+    const f = fixture({ ...options, timerDivisor: 100 });
+    const response = await new f.api.AddDOIEndpoint().run({
+      data: { doi: ANNUAL_DOI, collectionKey: null },
+    });
+    assert.equal(JSON.parse(response[2]).code, code);
+    assert.equal(f.items.size, 0);
+    assert.equal(f.stats.translations, 0);
+    assert.equal(f.stats.activeChrome, 0);
+    assert.ok(
+      ![...f.files.keys()].some((p) =>
+        p.startsWith("/data/doi2pdf/downloads/"),
+      ),
+    );
+  }
+});
+
+test("Annual Reviews download failures retain the parent and clean streams", async () => {
+  for (const [options, code] of [
+    [{ annualPageDOI: "10.9999/wrong" }, "DOI_MISMATCH"],
+    [
+      {
+        annualFinalURL:
+          "https://www.annualreviews.org.evil.test/content/journals/" +
+          ANNUAL_DOI,
+      },
+      "UNEXPECTED_PUBLISHER",
+    ],
+    [{ chromeChallenge: true }, "NEEDS_BROWSER_ACCESS"],
+    [{ annualStatus: 403 }, "ANNUALREVIEWS_PDF_UNAVAILABLE"],
+    [{ annualFormMissing: true }, "ANNUALREVIEWS_PDF_UNAVAILABLE"],
+    [
+      { annualFormAction: ANNUAL_PDF.replace(ANNUAL_DOI, "10.1146/wrong") },
+      "UNEXPECTED_PUBLISHER",
+    ],
+    [
+      { annualPDFURL: ANNUAL_PDF.replace(ANNUAL_DOI, "10.1146/wrong") },
+      "UNEXPECTED_PUBLISHER",
+    ],
+    [{ chromeHTML: true }, "INVALID_PDF"],
+    [{ chromeHangPDF: true }, "ANNUALREVIEWS_TIMEOUT"],
+    [{ streamError: true }, undefined],
+    [{ streamNoEOF: true }, "ANNUALREVIEWS_TIMEOUT"],
+  ]) {
+    const f = fixture({ ...options, timerDivisor: 100 });
+    const item = f.parent(ANNUAL_DOI);
+    const result = await f.api.findFullText(item);
+    assert.equal(result.status, "failed");
+    // Cancellation replies immediately; the owned stream then releases its files.
+    await delay(25);
+    if (code) assert.equal(result.code, code);
+    assert.ok(f.items.has(item.id));
+    assert.equal(f.stats.native, 0);
+    assert.equal(f.stats.imports, 0);
+    assert.equal(f.stats.activeChrome, 0);
+    assert.ok(
+      ![...f.files.keys()].some((p) =>
+        p.startsWith("/data/doi2pdf/downloads/"),
+      ),
+    );
+  }
+});
+
+test("Annual Reviews, Cell and PNAS serialize their shared Chrome profile", async () => {
+  const f = fixture({ nativeFailure: true, timerDivisor: 20 });
+  const cell = f.parent(CELL_DOI);
+  Object.assign(cell.fields, CELL_FIELDS);
+  const results = await Promise.all([
+    f.api.findFullText(f.parent(ANNUAL_DOI)),
+    f.api.findFullText(cell),
+    f.api.findFullText(f.parent(PNAS_DOI)),
+  ]);
+  assert.deepEqual(
+    results.map((x) => x.source),
+    ["annualreviews", "cell", "pnas"],
+  );
+  assert.equal(f.stats.maxChrome, 1);
+  assert.equal(f.stats.activeChrome, 0);
 });
 
 test("a late Cell stream write is cleaned after deadline cancellation", async () => {

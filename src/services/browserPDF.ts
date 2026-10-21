@@ -4,7 +4,7 @@ import { IdentifierError } from "./identifier";
 import { createPDFTemp, PDFCandidate, stagePDF, validatePDF } from "./pdf";
 
 interface BrowserPDFOptions {
-  source: "pnas" | "cell";
+  source: "pnas" | "cell" | "annualreviews";
   timeoutMs: number;
   timeoutMessage: string;
 }
@@ -17,9 +17,13 @@ interface BrowserPDFContext {
 }
 
 interface PDFStreamOptions {
-  publisher: "PNAS" | "Cell";
+  publisher: "PNAS" | "Cell" | "Annual Reviews";
   pdfURL: string;
   blockedHosts?: string[];
+  responsePattern?: string;
+  matchesPDF?: (url: string) => boolean;
+  start?: (sessionId: string) => Promise<unknown>;
+  errorPrefix?: string;
 }
 
 /**
@@ -27,13 +31,21 @@ interface PDFStreamOptions {
  *
  * Args:
  *   context: Browser and private file resources owned by the download task.
- *   options: Expected PDF URL and publisher-specific blocked redirect hosts.
+ *   options: PDF URL or signed-URL matcher, optional form trigger and blocked hosts.
  * Returns:
  *   The page session and a saver to call after verifying article identity.
  */
 export async function openBrowserPDFStream(
   { task, browser, temporary, directory }: BrowserPDFContext,
-  { publisher, pdfURL, blockedHosts = [] }: PDFStreamOptions,
+  {
+    publisher,
+    pdfURL,
+    blockedHosts = [],
+    responsePattern,
+    matchesPDF,
+    start,
+    errorPrefix = publisher.toUpperCase(),
+  }: PDFStreamOptions,
 ): Promise<{ sessionId: string; save: () => Promise<void> }> {
   const win = Zotero.getMainWindow();
   let paused: { requestId: string } | undefined;
@@ -65,11 +77,21 @@ export async function openBrowserPDFStream(
         ),
       );
       const type = headers.get("content-type") || "";
+      let matched: boolean;
+      try {
+        // Signed publisher URLs are checked against article identity, not query tokens.
+        matched = matchesPDF
+          ? matchesPDF(response.request.url)
+          : response.request.url === pdfURL;
+      } catch (error) {
+        task.cancel(error as Error);
+        return;
+      }
       const verification =
         headers.get("cf-mitigated")?.toLowerCase() === "challenge";
       browser.challenge ||= verification;
       if (
-        response.request.url === pdfURL &&
+        matched &&
         response.responseStatusCode === 200 &&
         !verification &&
         (!type || /^application\/(?:pdf|octet-stream)(?:;|$)/i.test(type))
@@ -77,14 +99,10 @@ export async function openBrowserPDFStream(
         paused = response;
         return;
       }
-      if (
-        response.request.url === pdfURL &&
-        response.responseStatusCode >= 400 &&
-        !verification
-      ) {
+      if (matched && response.responseStatusCode >= 400 && !verification) {
         task.cancel(
           new IdentifierError(
-            `${publisher.toUpperCase()}_PDF_UNAVAILABLE`,
+            `${errorPrefix}_PDF_UNAVAILABLE`,
             `${publisher} refused PDF access (HTTP ${response.responseStatusCode})`,
           ),
         );
@@ -120,7 +138,7 @@ export async function openBrowserPDFStream(
           { urlPattern: `*://${host}/*` },
           { urlPattern: `*://*.${host}/*` },
         ]),
-        { urlPattern: pdfURL, requestStage: "Response" },
+        { urlPattern: responsePattern ?? pdfURL, requestStage: "Response" },
       ],
     },
     sessionId,
@@ -130,19 +148,23 @@ export async function openBrowserPDFStream(
    * Read the matched response to EOF before releasing its paused navigation.
    *
    * Returns:
-   *   Completion after all response bytes have reached the private PDF file.
+   *   Completion after all bytes have reached the private PDF file.
    */
   async function save(): Promise<void> {
     let navigationError: string | undefined;
-    const navigation = browser
-      .command("Page.navigate", { url: pdfURL }, sessionId)
-      .then(
-        (result) => {
-          if (result.errorText && !/ERR_ABORTED/.test(result.errorText))
-            navigationError = result.errorText;
-        },
-        () => undefined,
-      );
+    const navigation = (
+      start
+        ? start(sessionId)
+        : browser.command("Page.navigate", { url: pdfURL }, sessionId)
+    ).then(
+      (result) => {
+        const errorText = (result as { errorText?: string } | undefined)
+          ?.errorText;
+        if (errorText && !/ERR_ABORTED/.test(errorText))
+          navigationError = errorText;
+      },
+      () => undefined,
+    );
     while (!paused) {
       task.check();
       if (navigationError)

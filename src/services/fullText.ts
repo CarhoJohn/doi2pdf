@@ -11,6 +11,8 @@ import { canFetchNaturePDF, downloadNaturePDF } from "./naturePDF";
 import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
 import { getCellArticle } from "./cellMetadata";
 import { downloadCellPDF } from "./cellPDF";
+import { downloadAnnualReviewsPDF } from "./annualReviewsPDF";
+import { lookupAnnualReviewsMetadata } from "./crossref";
 
 // Start the Nature/PNAS fallback after 8 seconds without a native PDF.
 export const NATIVE_WAIT_MS = 8_000;
@@ -39,7 +41,7 @@ interface DownloadOutcome {
 
 /** Publisher strategy used only by this module's full-text coordinator. */
 interface PublisherPDFRoute {
-  source: "cell" | "pnas" | "nature";
+  source: "cell" | "pnas" | "nature" | "annualreviews";
   nativeFirst: boolean;
   download: () => Promise<PDFCandidate>;
 }
@@ -56,7 +58,7 @@ interface PublisherPDFRoute {
  */
 function notifyFallbackResult(
   item: Zotero.Item,
-  publisher: "nature" | "pnas" | "cell" | undefined,
+  publisher: PublisherPDFRoute["source"] | undefined,
   result: FullTextResult,
 ): FullTextResult {
   if (!publisher) return result;
@@ -67,9 +69,11 @@ function notifyFallbackResult(
         ? "常规路线"
         : publisher === "cell"
           ? "Cell Press"
-          : publisher === "pnas"
-            ? "PNAS"
-            : "Nature";
+          : publisher === "annualreviews"
+            ? "Annual Reviews"
+            : publisher === "pnas"
+              ? "PNAS"
+              : "Nature";
     const doi = normalizeDOI(item.getField("DOI"));
     const title = String(item.getField("title")).replace(/\s+/g, " ").trim();
     const label = title.length > 70 ? title.slice(0, 69) + "…" : title;
@@ -93,7 +97,7 @@ function notifyFallbackResult(
           : result.code === "CHROME_NOT_FOUND"
             ? "未找到 Google Chrome"
             : /timed out|timeout/i.test(result.message || "")
-              ? `下载超时（${publisher === "cell" ? 60 : 30} 秒）`
+              ? `下载超时（${publisher === "cell" || publisher === "annualreviews" ? 60 : 30} 秒）`
               : result.code === "DOI_MISMATCH"
                 ? "网页 DOI 与文献不匹配"
                 : result.status === "not_found"
@@ -185,6 +189,14 @@ async function selectPublisherPDF(
       source: "cell",
       nativeFirst: false,
       download: () => downloadCellPDF(item, cell),
+    };
+  // Confirm publisher identity from API metadata before DOI-specific fallback rules.
+  const doi = normalizeDOI(item.getField("DOI"));
+  if (doi && (await lookupAnnualReviewsMetadata(doi)))
+    return {
+      source: "annualreviews",
+      nativeFirst: false,
+      download: () => downloadAnnualReviewsPDF(item),
     };
   if (canFetchPNASPDF(item))
     return {

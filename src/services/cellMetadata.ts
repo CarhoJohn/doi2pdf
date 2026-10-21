@@ -1,4 +1,5 @@
 import { IdentifierError, normalizeDOI } from "./identifier";
+import { lookupCrossrefMetadata } from "./crossref";
 
 /** A locally registered Cell or partner journal, independent of DOI patterns. */
 export interface CellJournal {
@@ -152,12 +153,7 @@ export async function lookupCellArticle(
   known?: CellArticle,
 ): Promise<CellArticle | undefined> {
   if (known?.pii || known?.crossrefChecked) return known;
-  const response = await Zotero.HTTP.request(
-    "GET",
-    `https://api.crossref.org/works/${encodeURIComponent(doi)}`,
-    { timeout },
-  );
-  const metadata = JSON.parse(response.responseText).message;
+  const metadata = await lookupCrossrefMetadata(doi, timeout);
   if (normalizeDOI(metadata?.DOI) !== doi)
     throw new IdentifierError(
       "DOI_MISMATCH",

@@ -10,7 +10,7 @@
 | `addon/`                  | 插件 bootstrap、manifest、偏好设置、界面和语言资源        |
 | `src/index.ts`            | 初始化插件实例                                            |
 | `src/addon.ts`            | 注册/注销端点，保留通用标识符导入、健康检查和集合查询接口 |
-| `src/hooks.ts`            | 启动、窗口及关闭事件；关闭时取消 PNAS/Cell 浏览器下载     |
+| `src/hooks.ts`            | 启动、窗口及关闭事件；关闭时取消共享 Chrome 浏览器下载    |
 | `src/endpoints/`          | DOI 导入、全文查询、本地 PDF 导入的 HTTP 参数校验和响应   |
 | `src/services/`           | 元数据、全文协调、下载传输及附件持久化                    |
 | `src/utils/`              | 偏好设置、本地化、窗口及 toolkit 工具                     |
@@ -21,35 +21,41 @@
 
 ## PDF 模块职责
 
-| 模块               | 负责的行为                                                                        |
-| ------------------ | --------------------------------------------------------------------------------- |
-| `identifier.ts`    | DOI 归一化、集合解析、元数据导入与同 DOI 导入去重                                 |
-| `fullText.ts`      | 复用已有 PDF、期刊路由、同父条目任务去重、原生下载与出版社后备竞速、结果诊断      |
-| `naturePDF.ts`     | curl 下载 Nature 文章和 PDF；校验文章 DOI、域名及 PDF 链接                        |
-| `pnasPDF.ts`       | PNAS 主刊 URL 拼接、页面验证与公共响应流下载调用                                  |
-| `cellPDF.ts`       | Cell PII 解析、官网 URL 拼接、页面验证、响应流下载与拒绝 ScienceDirect 跳转       |
-| `browserPDF.ts`    | PNAS/Cell 公共任务生命周期与响应流传输：预算、排队、请求拦截、PDF 校验和清理      |
-| `chromeSession.ts` | Chrome 定位与启动、专用 profile、共享队列与关闭取消、CDP 请求及响应流读取         |
-| `downloadTask.ts`  | 整个任务的时间预算、取消通知、超时竞速与迟到候选文件清理                          |
-| `subprocess.ts`    | Gecko 子进程接口类型、管道读尽与诊断输出收集                                      |
-| `pdf.ts`           | PDF 候选类型、任务临时目录、`stagePDF` 文件所有权、PDF 头校验、附件查询和串行导入 |
+| 模块                  | 负责的行为                                                                        |
+| --------------------- | --------------------------------------------------------------------------------- |
+| `identifier.ts`       | DOI 归一化、集合解析、元数据导入与同 DOI 导入去重                                 |
+| `fullText.ts`         | 复用已有 PDF、期刊路由、同父条目任务去重、原生下载与出版社后备竞速、结果诊断      |
+| `naturePDF.ts`        | curl 下载 Nature 文章和 PDF；校验文章 DOI、域名及 PDF 链接                        |
+| `pnasPDF.ts`          | PNAS 主刊 URL 拼接、页面验证与公共响应流下载调用                                  |
+| `cellPDF.ts`          | Cell PII 解析、官网 URL 拼接、页面验证、响应流下载与拒绝 ScienceDirect 跳转       |
+| `annualReviewsPDF.ts` | Annual Reviews 页面核验、POST 下载表单与签名 PDF 响应流                           |
+| `crossref.ts`         | 完整 DOI 元数据查询、出版社识别与建条目、Cell/Annual Reviews 共享缓存             |
+| `browserPDF.ts`       | 共享 Chrome 任务与响应流传输：预算、排队、表单触发、请求拦截、PDF 校验和清理      |
+| `chromeSession.ts`    | Chrome 定位与启动、专用 profile、共享队列与关闭取消、CDP 请求及响应流读取         |
+| `downloadTask.ts`     | 整个任务的时间预算、取消通知、超时竞速与迟到候选文件清理                          |
+| `subprocess.ts`       | Gecko 子进程接口类型、管道读尽与诊断输出收集                                      |
+| `pdf.ts`              | PDF 候选类型、任务临时目录、`stagePDF` 文件所有权、PDF 头校验、附件查询和串行导入 |
 
 期刊路由由 `fullText.ts` 内部的 `selectPublisherPDF` 函数选择，全文协调流程统一调用选出的下载策略。
-Nature 使用 curl，PNAS/Cell 使用同一个 Chrome 响应流下载函数，各自保留出版社规则。
-PNAS/Cell 共用 `browserPDF.ts` 的任务生命周期和传输；三者复用任务管理、临时文件和附件导入能力。
+Nature 使用 curl，PNAS/Cell/Annual Reviews 使用同一个 Chrome 响应流下载函数，各自保留出版社规则。
+三条浏览器路线共用 `browserPDF.ts` 的任务生命周期和传输；所有路线复用临时文件和附件导入能力。
 公共浏览器下载层不承担出版社域名、PII 或下载 URL 判定。
 
 ## DOI 导入与全文获取
 
 ```mermaid
 flowchart TD
-    A[add-doi 请求] --> B[identifier: 复用或创建元数据父条目]
+    A[add-doi 请求] --> Q{Crossref 确认为 Annual Reviews?}
+    Q -->|是| M[复用父条目或从 API 创建元数据]
+    Q -->|否| B[identifier: 复用或创建元数据父条目]
+    M --> C
     B --> C[fullText: 按父条目共享任务]
     D[find-full-text 请求] --> C
     C --> E{已有可用 PDF?}
     E -->|是| R[返回现有附件]
     E -->|否| S[fullText.selectPublisherPDF: 选择期刊策略]
     S -->|Cell 直接下载| L[串行 Chrome 响应流]
+    S -->|Annual Reviews 直接提交 PDF 表单| L
     S -->|原生优先或无专用路线| N[Zotero 原生 resolver 下载]
     L -->|成功候选| I
     N -->|及时找到 PDF| I[pdf.importPDF]
@@ -70,12 +76,15 @@ flowchart TD
   原生提前失败或无结果时立即启动后备，迟到的原生成功仍可在后备结束前获胜。
 - Nature/PNAS 任务预算为 30 秒，Cell 为 60 秒，从任务创建时开始；包含浏览器排队、
   PII 查询（Cell）、程序定位、启动和下载。期刊路由识别在下载任务创建前完成。
-- 原生与三种出版社下载路径仅生成临时候选。`stagePDF` 在无结果或异常时清理目录，
+- 原生与四种出版社下载路径仅生成临时候选。`stagePDF` 在无结果或异常时清理目录，
   成功时将清理责任交给调用方；下载进程/浏览器先由路线释放。
 - `fullText` 完成后清理两条路径的候选，包括迟到结果；`DownloadTask` 额外清理取消后的后备候选。
 - `importPDF` 按 `libraryID/itemKey` 串行写入，并复核父条目及预期 DOI。
   自动下载和手动导入共用此入口，避免同一父条目重复导入 PDF。
-- PNAS/Cell 的共享 profile 必须串行使用，任务目录独立；关闭只操作该任务启动的 Chrome，保留 profile。
+- PNAS/Cell/Annual Reviews 的共享 profile 必须串行使用，任务目录独立；关闭只操作该任务启动的 Chrome，保留 profile。
+- Annual Reviews 使用 Crossref 出版社元数据识别，不按 DOI 数字前缀或网页期刊字段判断。
+  元数据 API 最多等待 5 秒，PDF 浏览器下载预算 60 秒；绕过 Zotero identifier/原生 resolver。
+  PDF POST 表单的签名重定向由浏览器完成。
 - `add-doi` 的显式 `pdfPath` 会在创建元数据前校验，并绕过网络全文查询；
   `import-pdf` 只向现有父条目导入。调用方提供的源文件不会被清理。
 

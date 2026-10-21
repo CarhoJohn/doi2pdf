@@ -217,10 +217,15 @@ const doiImports = new Map<
  * Args:
  *   doi: Normalized DOI to resolve.
  *   collectionKey: Optional destination collection key.
+ *   createItem: Publisher metadata creator that bypasses identifier lookup.
  * Returns:
  *   The parent and whether this caller created it.
  */
-export async function getOrCreateDOIItem(doi: string, collectionKey?: unknown) {
+export async function getOrCreateDOIItem(
+  doi: string,
+  collectionKey?: unknown,
+  createItem?: () => Promise<Zotero.Item>,
+) {
   const pending = doiImports.get(doi);
   if (pending) return { item: (await pending).item, created: false };
   const operation = (async () => {
@@ -228,7 +233,10 @@ export async function getOrCreateDOIItem(doi: string, collectionKey?: unknown) {
     if (existing) return { item: existing, created: false };
     // PDF retrieval starts later, after the parent identity is stable.
     return {
-      item: await addByIdentifier(doi, collectionKey, false),
+      // Publishers with API metadata bypass identifier translators entirely.
+      item: createItem
+        ? await createItem()
+        : await addByIdentifier(doi, collectionKey, false),
       created: true,
     };
   })();

@@ -1,6 +1,7 @@
 import { errorResponse, jsonResponse } from "./helpers";
 import {
   getOrCreateDOIItem,
+  addByIdentifier,
   IdentifierError,
   normalizeDOI,
   resolveDestinationCollection,
@@ -8,6 +9,10 @@ import {
 } from "../services/identifier";
 import { findFullText } from "../services/fullText";
 import { importPDF, validatePDF } from "../services/pdf";
+import {
+  createCrossrefItem,
+  lookupAnnualReviewsMetadata,
+} from "../services/crossref";
 
 /** HTTP endpoint for idempotent DOI ingestion and optional full-text lookup. */
 export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
@@ -72,7 +77,17 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
         await validatePDF(pdfPath);
       }
       const collections = await resolveDestinationCollection(collectionKey);
-      const { item, created } = await getOrCreateDOIItem(doi, collectionKey);
+      const { item, created } = await getOrCreateDOIItem(
+        doi,
+        collectionKey,
+        async () => {
+          // Publisher identity comes from the exact DOI's API metadata, never its prefix.
+          const annual = await lookupAnnualReviewsMetadata(doi);
+          return annual
+            ? createCrossrefItem(annual, collectionKey)
+            : addByIdentifier(doi, collectionKey, false);
+        },
+      );
       if (!created && collections !== false) {
         item.addToCollection(collections[0]);
         await item.saveTx();
