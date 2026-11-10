@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
+import console from "node:console";
 import { readFileSync } from "node:fs";
+import process from "node:process";
 
 /**
  * Run a Git command and return its trimmed UTF-8 output.
