@@ -12,7 +12,8 @@ import { canFetchPNASPDF, downloadPNASPDF } from "./pnasPDF";
 import { getCellArticle } from "./cellMetadata";
 import { downloadCellPDF } from "./cellPDF";
 import { downloadAnnualReviewsPDF } from "./annualReviewsPDF";
-import { lookupAnnualReviewsMetadata } from "./crossref";
+import { getDOIPublisher } from "./publishers";
+import { downloadSciencePDF } from "./sciencePDF";
 
 // Start the Nature/PNAS fallback after 8 seconds without a native PDF.
 export const NATIVE_WAIT_MS = 8_000;
@@ -41,7 +42,7 @@ interface DownloadOutcome {
 
 /** Publisher strategy used only by this module's full-text coordinator. */
 interface PublisherPDFRoute {
-  source: "cell" | "pnas" | "nature" | "annualreviews";
+  source: "cell" | "pnas" | "nature" | "annualreviews" | "science";
   nativeFirst: boolean;
   download: () => Promise<PDFCandidate>;
 }
@@ -73,7 +74,9 @@ function notifyFallbackResult(
             ? "Annual Reviews"
             : publisher === "pnas"
               ? "PNAS"
-              : "Nature";
+              : publisher === "science"
+                ? "Science"
+                : "Nature";
     const doi = normalizeDOI(item.getField("DOI"));
     const title = String(item.getField("title")).replace(/\s+/g, " ").trim();
     const label = title.length > 70 ? title.slice(0, 69) + "…" : title;
@@ -97,12 +100,14 @@ function notifyFallbackResult(
           : result.code === "CHROME_NOT_FOUND"
             ? "未找到 Google Chrome"
             : /timed out|timeout/i.test(result.message || "")
-              ? `下载超时（${publisher === "cell" || publisher === "annualreviews" ? 60 : 30} 秒）`
+              ? `下载超时（${publisher === "cell" || publisher === "annualreviews" || publisher === "science" ? 60 : 30} 秒）`
               : result.code === "DOI_MISMATCH"
                 ? "网页 DOI 与文献不匹配"
-                : result.status === "not_found"
-                  ? "未找到可下载的 PDF"
-                  : "未能下载或保存 PDF";
+                : result.code === "SCIENCE_PDF_UNAVAILABLE"
+                  ? "PDF 不可用或无访问权限"
+                  : result.status === "not_found"
+                    ? "未找到可下载的 PDF"
+                    : "未能下载或保存 PDF";
       popup.createLine({ text: reason, progress: 100 });
     }
     popup.show();
@@ -182,33 +187,42 @@ async function downloadNativePDF(
 async function selectPublisherPDF(
   item: Zotero.Item,
 ): Promise<PublisherPDFRoute | undefined> {
-  // Cell identity comes from journal metadata; DOI prefixes alone are ambiguous.
-  const cell = await getCellArticle(item);
-  if (cell)
-    return {
-      source: "cell",
-      nativeFirst: false,
-      download: () => downloadCellPDF(item, cell),
-    };
-  // Confirm publisher identity from API metadata before DOI-specific fallback rules.
   const doi = normalizeDOI(item.getField("DOI"));
-  if (doi && (await lookupAnnualReviewsMetadata(doi)))
+  const publisher = getDOIPublisher(doi);
+  // Prefixes select candidates; article identity is verified by each download route.
+  if (publisher === "science-family")
     return {
-      source: "annualreviews",
+      source: "science",
       nativeFirst: false,
-      download: () => downloadAnnualReviewsPDF(item),
+      download: () => downloadSciencePDF(item),
     };
-  if (canFetchPNASPDF(item))
+  if (publisher === "nature-family" && canFetchNaturePDF(item))
+    return {
+      source: "nature",
+      nativeFirst: true,
+      download: () => downloadNaturePDF(item),
+    };
+  if (publisher === "pnas" && canFetchPNASPDF(item))
     return {
       source: "pnas",
       nativeFirst: true,
       download: () => downloadPNASPDF(item),
     };
-  if (canFetchNaturePDF(item))
+  if (publisher === "cell-press") {
+    // A known non-Cell ISSN is excluded, since 10.1016 is shared with other journals.
+    const cell = await getCellArticle(item);
+    if (cell || !item.getField("ISSN"))
+      return {
+        source: "cell",
+        nativeFirst: false,
+        download: () => downloadCellPDF(item, cell),
+      };
+  }
+  if (publisher === "annual-reviews")
     return {
-      source: "nature",
-      nativeFirst: true,
-      download: () => downloadNaturePDF(item),
+      source: "annualreviews",
+      nativeFirst: false,
+      download: () => downloadAnnualReviewsPDF(item),
     };
   return undefined;
 }

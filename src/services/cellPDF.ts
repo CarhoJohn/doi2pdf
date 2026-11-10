@@ -8,14 +8,14 @@ import type { PDFCandidate } from "./pdf";
  *
  * Args:
  *   item: Existing parent whose DOI will be checked again before import.
- *   article: Journal identity determined from metadata, not DOI patterns.
+ *   article: Optional locally verified journal and PII information.
  * Returns:
  *   A validated PDF candidate after the complete browser response reaches EOF.
  *   Queueing, PII lookup, startup and download share a 60-second budget.
  */
 export async function downloadCellPDF(
   item: Zotero.Item,
-  article: CellArticle,
+  article?: CellArticle,
 ): Promise<PDFCandidate> {
   const doi = normalizeDOI(item.getField("DOI"));
   if (!doi)

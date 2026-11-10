@@ -17,7 +17,7 @@ export interface CrossrefMetadata {
   link?: { URL?: string }[];
 }
 
-// Reuse one bounded lookup across ingestion and Cell/Annual Reviews routing.
+// Reuse bounded metadata lookups across ingestion and Cell PII resolution.
 const records = new Map<
   string,
   { expires: number; request: Promise<CrossrefMetadata> }
@@ -60,28 +60,6 @@ export function lookupCrossrefMetadata(
     if (records.get(doi)?.request === request) records.delete(doi);
   });
   return request;
-}
-
-/**
- * Identify Annual Reviews from the API publisher field.
- * Args:
- *   doi: Complete normalized DOI.
- * Returns:
- *   Its record, or undefined for another publisher or a network failure.
- */
-export async function lookupAnnualReviewsMetadata(
-  doi: string,
-): Promise<CrossrefMetadata | undefined> {
-  try {
-    const metadata = await lookupCrossrefMetadata(doi);
-    return metadata.publisher?.trim().toLowerCase() === "annual reviews"
-      ? metadata
-      : undefined;
-  } catch (error) {
-    if (error instanceof IdentifierError) throw error;
-    Zotero.logError(error as Error);
-    return undefined;
-  }
 }
 
 /**

@@ -2,7 +2,7 @@ import { IdentifierError, normalizeDOI } from "./identifier";
 
 export interface PDFCandidate {
   path: string;
-  source: "native" | "nature" | "pnas" | "cell" | "annualreviews";
+  source: "native" | "nature" | "pnas" | "cell" | "annualreviews" | "science";
   url?: string;
   timings?: { articleMs: number; pdfMs: number; totalMs: number };
   cleanup: () => void;

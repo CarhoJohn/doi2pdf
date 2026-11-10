@@ -194,7 +194,7 @@ export async function lookupCellArticle(
  * Args:
  *   item: Resolved bibliographic parent.
  * Returns:
- *   Local journal identity, or a bounded metadata lookup for incomplete items.
+ *   Local journal identity, or undefined when the parent cannot verify it.
  */
 export async function getCellArticle(
   item: Zotero.Item,
@@ -203,17 +203,5 @@ export async function getCellArticle(
   const title = item.getField("publicationTitle");
   const url = item.getField("url");
   const journal = await matchCellJournal({ issns, title, url });
-  if (journal) return { journal, pii: cellPII(url) };
-  if (issns) return undefined;
-  const doi = normalizeDOI(item.getField("DOI"));
-  if (!doi) return undefined;
-  try {
-    return await lookupCellArticle(doi);
-  } catch (error) {
-    // Conflicting identities are not an outage and must not fall through.
-    if (error instanceof IdentifierError) throw error;
-    // A metadata outage must not disable existing publishers' native resolvers.
-    Zotero.logError(error as Error);
-    return undefined;
-  }
+  return journal ? { journal, pii: cellPII(url) } : undefined;
 }

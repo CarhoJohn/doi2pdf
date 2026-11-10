@@ -324,6 +324,7 @@ export class ChromeSession {
    *   sessionId: Owned article page session, without a paused PDF response.
    *   doi: Normalized parent DOI.
    *   publisher: Name included in identity failure diagnostics.
+   *   doiMetaName: Publisher-specific DOI meta tag name.
    * Returns:
    *   Article DOI, current URL and optional advertised PDF URL.
    */
@@ -331,6 +332,7 @@ export class ChromeSession {
     sessionId: string,
     doi: string,
     publisher: string,
+    doiMetaName = "citation_doi",
   ): Promise<{
     doi: string;
     url: string;
@@ -343,8 +345,7 @@ export class ChromeSession {
       const response = await this.command(
         "Runtime.evaluate",
         {
-          expression:
-            "({doi:document.querySelector('meta[name=citation_doi]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})",
+          expression: `({doi:document.querySelector('meta[name="${doiMetaName}"]')?.content,pdf:document.querySelector('meta[name=citation_pdf_url]')?.content,title:document.title,url:location.href})`,
           returnByValue: true,
         },
         sessionId,

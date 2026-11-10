@@ -11,8 +11,9 @@ import { findFullText } from "../services/fullText";
 import { importPDF, validatePDF } from "../services/pdf";
 import {
   createCrossrefItem,
-  lookupAnnualReviewsMetadata,
+  lookupCrossrefMetadata,
 } from "../services/crossref";
+import { getDOIPublisher } from "../services/publishers";
 
 /** HTTP endpoint for idempotent DOI ingestion and optional full-text lookup. */
 export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
@@ -81,11 +82,18 @@ export class AddDOIEndpoint extends Zotero.Server.LocalAPI.Schema {
         doi,
         collectionKey,
         async () => {
-          // Publisher identity comes from the exact DOI's API metadata, never its prefix.
-          const annual = await lookupAnnualReviewsMetadata(doi);
-          return annual
-            ? createCrossrefItem(annual, collectionKey)
-            : addByIdentifier(doi, collectionKey, false);
+          // Prefix chooses the route; Crossref here supplies only Annual Reviews metadata.
+          if (getDOIPublisher(doi) === "annual-reviews") {
+            let metadata;
+            try {
+              metadata = await lookupCrossrefMetadata(doi);
+            } catch (error) {
+              if (error instanceof IdentifierError) throw error;
+              Zotero.logError(error as Error);
+            }
+            if (metadata) return createCrossrefItem(metadata, collectionKey);
+          }
+          return addByIdentifier(doi, collectionKey, false);
         },
       );
       if (!created && collections !== false) {

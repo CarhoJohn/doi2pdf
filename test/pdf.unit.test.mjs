@@ -18,6 +18,8 @@ const bundle = buildSync({
       export * from './src/services/cellMetadata';
       export * from './src/services/cellPDF';
       export * from './src/services/annualReviewsPDF';
+      export * from './src/services/sciencePDF';
+      export * from './src/services/publishers';
       export * from './src/services/crossref';
       export * from './src/endpoints/importPDF';
       export * from './src/endpoints/addDOI';`,
@@ -32,6 +34,7 @@ const DOI = "10.1038/s42256-026-01281-1";
 const PDF = "%PDF-1.4\nfixture";
 const PNAS_DOI = "10.1073/pnas.2515233123";
 const CELL_DOI = "10.1016/j.isci.2026.117391";
+const SCIENCE_DOI = "10.1126/sciadv.aeb2684";
 const CELL_PII = "S2589-0042(26)02769-0";
 const ANNUAL_DOI = "10.1146/annurev-psych-032526-071359";
 const ANNUAL_URL =
@@ -60,6 +63,152 @@ const registryText = readFileSync(
   "utf8",
 );
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("packaged DOI prefixes select journal-family route candidates", () => {
+  const f = fixture();
+  for (const [prefix, publisher] of [
+    ["10.1038", "nature-family"],
+    ["10.1016", "cell-press"],
+    ["10.1126", "science-family"],
+    ["10.1146", "annual-reviews"],
+    ["10.1073", "pnas"],
+    ["10.1037", "apa"],
+  ]) {
+    assert.equal(
+      f.api.getDOIPublisher(`https://doi.org/${prefix}/EXAMPLE`),
+      publisher,
+    );
+  }
+  assert.equal(f.api.getDOIPublisher("10.11260/example"), undefined);
+  assert.equal(f.api.getDOIPublisher("invalid"), undefined);
+});
+
+test("Science DOI routes through the shared browser and validates publication_doi", async () => {
+  const f = fixture({ timerDivisor: 50 });
+  const item = f.parent(SCIENCE_DOI);
+  const result = await f.api.findFullText(item);
+  assert.equal(result.status, "found");
+  assert.equal(result.source, "science");
+  assert.equal(f.stats.native, 0);
+  assert.equal(f.stats.imports, 1);
+  assert.equal(f.stats.chrome, 1);
+  assert.ok(
+    f.stats.cdp.some((request) =>
+      request.params?.expression?.includes("publication_doi"),
+    ),
+  );
+  assert.ok(
+    f.stats.cdp.some(
+      (request) =>
+        request.params?.url ===
+        `https://www.science.org/doi/pdf/${SCIENCE_DOI}?download=true`,
+    ),
+  );
+  assert.match(f.stats.notifications[0].descriptions[0], /Science/);
+  assert.equal(f.stats.activeChrome, 0);
+});
+
+test("all six Science journal DOI suffixes use the Science family route", async () => {
+  for (const suffix of [
+    "science",
+    "sciadv",
+    "sciimmunol",
+    "scirobotics",
+    "scisignal",
+    "scitranslmed",
+  ]) {
+    const f = fixture({ timerDivisor: 50 });
+    const result = await f.api.findFullText(
+      f.parent(`10.1126/${suffix}.example`),
+    );
+    assert.equal(result.source, "science", suffix);
+    assert.equal(f.stats.metadataRequests?.length ?? 0, 0);
+  }
+});
+
+test("DOI prefix chooses the route without Crossref publisher lookup", async () => {
+  for (const [doi, fields, expected] of [
+    [DOI, {}, "native"],
+    [PNAS_DOI, {}, "native"],
+    [CELL_DOI, CELL_FIELDS, "cell"],
+    [ANNUAL_DOI, {}, "annualreviews"],
+    ["10.1037/example", {}, "native"],
+    ["10.9999/example", {}, "native"],
+  ]) {
+    const f = fixture({ timerDivisor: 50 });
+    const item = f.parent(doi);
+    Object.assign(item.fields, fields);
+    const result = await f.api.findFullText(item);
+    assert.equal(result.source, expected, doi);
+    assert.equal(f.stats.metadataRequests?.length ?? 0, 0, doi);
+  }
+});
+
+test("Science add-doi retains the parent when the PDF requires access", async () => {
+  for (const [scienceStatus, expected] of [
+    [200, "found"],
+    [302, "failed"],
+  ]) {
+    const f = fixture({ timerDivisor: 50, scienceStatus });
+    const response = await new f.api.AddDOIEndpoint().run({
+      data: { doi: SCIENCE_DOI, collectionKey: null },
+    });
+    const body = JSON.parse(response[2]);
+    assert.equal(response[0], 200);
+    assert.equal(body.status, "success");
+    assert.equal(body.created, true);
+    assert.equal(body.fullText.status, expected);
+    assert.equal(f.stats.translations, 1);
+    assert.equal(f.stats.imports, scienceStatus === 200 ? 1 : 0);
+    if (scienceStatus === 302)
+      assert.equal(body.fullText.code, "SCIENCE_PDF_UNAVAILABLE");
+  }
+});
+
+test("Science rejects mismatched identity, redirects, HTML, and failed streams without importing", async () => {
+  for (const [options, code] of [
+    [{ sciencePageDOI: "10.1126/sciadv.wrong" }, "DOI_MISMATCH"],
+    [
+      { scienceFinalURL: "https://elsewhere.example/doi/" + SCIENCE_DOI },
+      "UNEXPECTED_PUBLISHER",
+    ],
+    [{ scienceStatus: 302 }, "SCIENCE_PDF_UNAVAILABLE"],
+    [
+      {
+        scienceStatus: 200,
+        scienceHeaders: [{ name: "Content-Type", value: "text/html" }],
+      },
+      "SCIENCE_PDF_UNAVAILABLE",
+    ],
+    [{ scienceStatus: 403 }, "SCIENCE_PDF_UNAVAILABLE"],
+    [{ chromeHTML: true }, "INVALID_PDF"],
+    [{ chromeChallenge: true }, "NEEDS_BROWSER_ACCESS"],
+    [{ chromeHangPDF: true }, "SCIENCE_TIMEOUT"],
+  ]) {
+    const f = fixture({ timerDivisor: 50, ...options });
+    const item = f.parent(SCIENCE_DOI);
+    const result = await f.api.findFullText(item);
+    assert.equal(result.status, "failed", JSON.stringify(options));
+    assert.equal(result.code, code);
+    assert.equal(f.stats.imports, 0);
+    assert.equal(item.attachments.length, 0);
+    await delay(15);
+    assert.equal(f.stats.activeChrome, 0);
+    assert.ok(
+      ![...f.files.keys()].some((path) =>
+        path.startsWith("/data/doi2pdf/downloads/"),
+      ),
+    );
+  }
+});
+
+test("Science rejects DOI paths that would escape the expected article route", () => {
+  const f = fixture();
+  assert.throws(() => f.api.downloadSciencePDF(f.parent("10.1126/../other")), {
+    code: "INVALID_DOI",
+  });
+  assert.equal(f.stats.chrome, 0);
+});
 
 /** Build isolated Zotero/file/network doubles for observable workflow tests. */
 function fixture(options = {}) {
@@ -412,11 +561,28 @@ function fixture(options = {}) {
                 );
               }
             }
+            if (this.science && !options.chromeChallenge) {
+              result = {
+                result: {
+                  value: {
+                    doi: options.sciencePageDOI ?? this.doi,
+                    url:
+                      options.scienceFinalURL ??
+                      `https://www.science.org/doi/${this.doi}`,
+                    title: "Science paper",
+                  },
+                },
+              };
+            }
           }
           if (request.method === "Page.navigate") {
             const url = request.params.url;
             let pdfNavigation = false;
-            if (url.includes("annualreviews.org/")) {
+            if (url.includes("www.science.org/")) {
+              this.science = true;
+              pdfNavigation = url.includes("/doi/pdf/");
+              if (!pdfNavigation) this.doi = url.split("/doi/")[1];
+            } else if (url.includes("annualreviews.org/")) {
               this.annualreviews = true;
             } else if (url.includes("cell.com/")) {
               this.cell = true;
@@ -436,12 +602,16 @@ function fixture(options = {}) {
                           url: this.cell ? (options.cellRedirect ?? url) : url,
                         },
                         responseStatusCode:
-                          (this.cell
-                            ? options.cellStatus
-                            : options.pnasStatus) ?? 200,
-                        responseHeaders: (this.cell
-                          ? options.cellHeaders
-                          : options.pnasHeaders) || [
+                          (this.science
+                            ? options.scienceStatus
+                            : this.cell
+                              ? options.cellStatus
+                              : options.pnasStatus) ?? 200,
+                        responseHeaders: (this.science
+                          ? options.scienceHeaders
+                          : this.cell
+                            ? options.cellHeaders
+                            : options.pnasHeaders) || [
                           { name: "Content-Type", value: "application/pdf" },
                         ],
                       },
@@ -1373,8 +1543,8 @@ test("Cell add-doi saves the parent first then streams a minimized PDF without n
   assert.equal(f.stats.imports, 1);
   assert.equal(f.stats.chrome, 1);
   assert.ok(!f.stats.timers.includes(8000));
-  // Ingestion now checks Crossref publisher metadata before identifier creation.
-  assert.equal(f.stats.metadataRequests.length, 1);
+  // The DOI prefix routes directly, and this parent already carries its PII.
+  assert.equal(f.stats.metadataRequests?.length ?? 0, 0);
   assert.ok(f.stats.timers.includes(60000));
   assert.ok(f.stats.chromeArguments.includes("--start-minimized"));
   assert.ok(
@@ -1508,7 +1678,7 @@ test("unknown Elsevier journal uses native retrieval despite a Cell-like DOI", a
   const result = await f.api.findFullText(item);
   assert.equal(result.source, "native");
   assert.equal(f.stats.chrome, 0);
-  assert.equal(f.stats.metadataRequests.length, 1);
+  assert.equal(f.stats.metadataRequests?.length ?? 0, 0);
 });
 
 test("an incomplete parent with conflicting Crossref identity cannot fall through to native import", async () => {
@@ -1800,13 +1970,11 @@ test("Annual Reviews metadata-only and local PDF requests skip the browser PDF f
   }
 });
 
-test("Annual Reviews identification uses API publisher metadata, never DOI prefixes or webpage journal labels", async () => {
+test("Annual Reviews route uses the prefix while Crossref only supplies metadata", async () => {
   const otherDOI = "10.9999/shared-prefix-example";
   const f = fixture({ crossref: { ...ANNUAL_METADATA, DOI: otherDOI } });
-  assert.equal(
-    (await f.api.lookupAnnualReviewsMetadata(otherDOI)).publisher,
-    "Annual Reviews",
-  );
+  assert.equal((await f.api.findFullText(f.parent(otherDOI))).source, "native");
+  assert.equal(f.stats.metadataRequests?.length ?? 0, 0);
   const other = fixture({
     annualCrossref: { ...ANNUAL_METADATA, publisher: "Other Publisher" },
   });
@@ -1814,21 +1982,23 @@ test("Annual Reviews identification uses API publisher metadata, never DOI prefi
     data: { doi: ANNUAL_DOI, collectionKey: null, findFullText: false },
   });
   assert.equal(response[0], 200);
-  assert.equal(other.stats.translations, 1);
+  assert.equal(other.stats.translations, 0);
+  assert.equal(other.stats.metadataRequests.length, 1);
   assert.equal(other.stats.chrome, 0);
   const unavailable = fixture({ annualMetadataFailure: true });
-  assert.equal(
-    await unavailable.api.lookupAnnualReviewsMetadata(ANNUAL_DOI),
-    undefined,
-  );
+  const fallback = await new unavailable.api.AddDOIEndpoint().run({
+    data: { doi: ANNUAL_DOI, collectionKey: null, findFullText: false },
+  });
+  assert.equal(fallback[0], 200);
+  assert.equal(unavailable.stats.translations, 1);
   const item = other.parent(ANNUAL_DOI);
   Object.assign(item.fields, {
     publicationTitle: "Annual Review of Psychology",
     url: ANNUAL_URL,
     ISSN: "0066-4308",
   });
-  assert.equal((await other.api.findFullText(item)).source, "native");
-  assert.equal(other.stats.chrome, 0);
+  assert.equal((await other.api.findFullText(item)).source, "annualreviews");
+  assert.equal(other.stats.chrome, 1);
 });
 
 test("Annual Reviews validates metadata before saving a parent", async () => {

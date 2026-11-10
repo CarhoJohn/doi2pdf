@@ -4,7 +4,7 @@ import { IdentifierError } from "./identifier";
 import { createPDFTemp, PDFCandidate, stagePDF, validatePDF } from "./pdf";
 
 interface BrowserPDFOptions {
-  source: "pnas" | "cell" | "annualreviews";
+  source: "pnas" | "cell" | "annualreviews" | "science";
   timeoutMs: number;
   timeoutMessage: string;
 }
@@ -17,13 +17,14 @@ interface BrowserPDFContext {
 }
 
 interface PDFStreamOptions {
-  publisher: "PNAS" | "Cell" | "Annual Reviews";
+  publisher: "PNAS" | "Cell" | "Annual Reviews" | "Science";
   pdfURL: string;
   blockedHosts?: string[];
   responsePattern?: string;
   matchesPDF?: (url: string) => boolean;
   start?: (sessionId: string) => Promise<unknown>;
   errorPrefix?: string;
+  rejectRedirects?: boolean;
 }
 
 /**
@@ -45,6 +46,7 @@ export async function openBrowserPDFStream(
     matchesPDF,
     start,
     errorPrefix = publisher.toUpperCase(),
+    rejectRedirects = false,
   }: PDFStreamOptions,
 ): Promise<{ sessionId: string; save: () => Promise<void> }> {
   const win = Zotero.getMainWindow();
@@ -104,6 +106,38 @@ export async function openBrowserPDFStream(
           new IdentifierError(
             `${errorPrefix}_PDF_UNAVAILABLE`,
             `${publisher} refused PDF access (HTTP ${response.responseStatusCode})`,
+          ),
+        );
+        return;
+      }
+      // Science redirects inaccessible PDFs back to an HTML article page.
+      if (
+        matched &&
+        rejectRedirects &&
+        response.responseStatusCode >= 300 &&
+        response.responseStatusCode < 400 &&
+        !verification
+      ) {
+        task.cancel(
+          new IdentifierError(
+            `${errorPrefix}_PDF_UNAVAILABLE`,
+            `${publisher} PDF redirected instead of returning a PDF (HTTP ${response.responseStatusCode})`,
+          ),
+        );
+        return;
+      }
+      if (
+        matched &&
+        rejectRedirects &&
+        response.responseStatusCode === 200 &&
+        type &&
+        !/^application\/(?:pdf|octet-stream)(?:;|$)/i.test(type) &&
+        !verification
+      ) {
+        task.cancel(
+          new IdentifierError(
+            `${errorPrefix}_PDF_UNAVAILABLE`,
+            `${publisher} returned ${type} instead of a PDF`,
           ),
         );
         return;
